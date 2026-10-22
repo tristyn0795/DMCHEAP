@@ -115,6 +115,9 @@ Three takeaways:
 - Redis is a one-click Railway template. Colyseus's docs describe the same pattern (`RedisPresence` + `RedisDriver`) if you ever move to that framework.
 
 ## 5. Build order (smallest useful steps first)
+
+> **Status:** steps 1–6 are implemented. See `server/party.js`, `server/social.js`, `server/hub.js`, `client/hubworld.js` and `client/social.js`, plus the tests in `test/smoke.js`. Steps 7–8 remain.
+
 1. **Persistent parties + regroup after raid + ready check + member status.** This fixes the "seamless" problems with no new tech. *~1 day*
 2. **Invite links (`?join=CODE`) + Fill Squad.** *~0.5 day*
 3. **Reserved slots + "Join your squad" button.** *~0.5 day*

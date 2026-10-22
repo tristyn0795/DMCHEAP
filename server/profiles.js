@@ -10,7 +10,7 @@ const SLOT_TYPES = { primary: 'weapon', secondary: 'weapon', shield: 'shield', r
 
 export function newProfile(name) {
   const p = {
-    id: crypto.randomUUID().slice(0, 12),
+    id: crypto.randomUUID().replace(/-/g, '').slice(0, 12),
     token: crypto.randomBytes(24).toString('hex'),
     name: sanitizeName(name),
     created: Date.now(),

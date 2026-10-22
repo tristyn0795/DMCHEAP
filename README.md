@@ -18,7 +18,7 @@ npm test             # in-process raid logic + real WebSocket bots
 2. In Railway: **New Project → Deploy from GitHub repo**. `railway.json` sets the start command, the `/health` health check and a 15 s drain window.
 3. On the service, open **Settings → Networking → Generate Domain**. Clients connect to `wss://<domain>/ws` on the same port as the page.
 4. Add persistence. Pick one:
-   - **Recommended:** add the **Postgres** plugin and set `DATABASE_URL=${{Postgres.DATABASE_URL}}` on the service. The `profiles` table is created on boot.
+   - **Recommended:** add the **Postgres** plugin and set `DATABASE_URL=${{Postgres.DATABASE_URL}}` on the service. The `profiles`, `friends`, `friend_requests` and `recent_raiders` tables are created on boot.
    - **Or** attach a **Volume** mounted at `/app/data` and set `DATA_DIR=/app/data`.
 5. Keep **1 replica**. Raids live in process memory, so see "Scaling" before adding replicas.
 
@@ -28,6 +28,7 @@ npm test             # in-process raid logic + real WebSocket bots
 | `DATABASE_URL` | – | Postgres for profiles (falls back to JSON files) |
 | `DATA_DIR` | `./data` | JSON profile store when there's no Postgres |
 | `MAX_RAIDS` | `12` | Max concurrent raid instances (12 raiders each) |
+| `FILL_WAIT_MS` | `15000` | Max wait before Fill Squad launches a partial squad |
 
 ### Why it's built this way (Railway constraints)
 
@@ -61,28 +62,42 @@ npm test             # in-process raid logic + real WebSocket bots
 | Crafting & recycling | ARC workshop / DMZ 3D printer | Workbench levels 1–3 and 22 recipes. Recycle junk into materials. |
 | Traders & contracts | ARC traders/quests, DMZ orders | Penny the Quartermaster sells basics. Contracts cover kill, deliver, survey, extract and boss jobs. |
 | Skill trees | ARC (Survival/Mobility/Conditioning) | Same three trees, 9 nodes, 1 point per level. |
-| Squads | both (trios) | Party codes, up to 3 per squad, up to 12 raiders per raid. Squad and proximity text chat, plus pings. |
+| Squads | both (trios) | Up to 3 per squad, 12 raiders per raid. **Squads persist** between raids and through disconnects (5 min grace). Members **ready up** (which locks gear) and the leader deploys. Invite with a **link** (`/?join=CODE`) or a code. Squad, hub and proximity text chat, plus pings. |
+| Held slots / drop-in | Helldivers 2 SOS-style join | If the leader deploys without you, your raid slot is **held for 5 min**. **JOIN SQUAD** spawns you at your squad's infil. |
+| Fill Squad | ARC Raiders / Marathon | Solos and duos with *Fill* on are grouped into trios (≤15 s wait) and stay a squad afterwards. |
+| Friends & presence | Marathon "Runner Connections" | Add by **Name#TAG**. See who's in the hub, in the hideout or topside (with time left). One-click Invite/Join. **Recent Raiders** lists squadmates and the people you fought. |
+| Spectate squad | — | Dead or extracted while squadmates are still topside? Follow-cam them (Space for the next squadmate). |
+| Walkable hub | Dark and Darker tavern, Destiny Tower | **The Cheap Seats**: a shared 3D bunker (24 per instance, your squad and friends placed together). Stations open the menus, **The Lift** is the ready/deploy pad. Emotes (1–5), chat bubbles. **Menu mode** skips it. |
 
 ## Controls
 
-`WASD` move · `Shift` sprint · `C` crouch · mouse aim · `LMB` fire · `RMB` aim down sights · `R` reload · `1`/`2` weapons · `E` interact/search/revive/extract · `Q` heal · `Z` shield cell · `G` frag · `T` lure beacon · `X` tourniquet (while downed) · `Tab` inventory · `M` map · `F` ping · `V` swap shoulder · `Enter` chat (start with `/` for proximity).
+**Hub:** `WASD` walk · `E` use station / lift · `1`–`5` emotes · `Enter` chat (`/p` squad chat) · `Tab` terminal (menus) · `O` friends.
+
+**Raid:** `WASD` move · `Shift` sprint · `C` crouch · mouse aim · `LMB` fire · `RMB` aim down sights · `R` reload · `1`/`2` weapons · `E` interact/search/revive/extract · `Q` heal · `Z` shield cell · `G` frag · `T` lure beacon · `X` tourniquet (while downed) · `Tab` inventory · `M` map · `F` ping · `V` swap shoulder · `Enter` chat (start with `/` for proximity).
 
 ## Architecture
 
 ```
 client/                 static ES modules, no build step
   index.html, style.css
-  main.js               screen routing
+  main.js               screen routing (login / hub / menus / raid), invite links
   net.js                WebSocket + reconnect
-  hideout.js            stash/loadout/trader/workbench/contracts/skills/squad UI
+  hideout.js            stash/loadout/trader/workbench/contracts/skills UI (full screen or terminal overlay)
+  hubworld.js           walkable hub: Three.js scene, kiosks, lift, emotes, chat bubbles
+  social.js             squad + friends panels, Deploy/Ready/Join Squad button logic
+  models.js             shared low-poly character + label builders
   game.js               Three.js renderer, 3rd-person camera, prediction/interp, HUD, inventory, map
   audio.js              procedural WebAudio SFX (no assets)
 shared/                 imported by BOTH server and browser
   data.js               items, weapons, enemies, loot tables, recipes, skills, POIs
   world.js              seeded map generation, spatial grid, collision, raycasts
+  hubmap.js             hub layout (kiosks, lift) shared by server collision + client render
 server/
-  index.js              HTTP static + /ws, auth, parties, matchmaking, persistence hooks
-  raid.js               authoritative 20 Hz raid simulation
+  index.js              HTTP static + /ws, auth, message routing, deploy plumbing
+  raid.js               authoritative 20 Hz raid simulation (+ held slots, late squad joins, spectators)
+  party.js              persistent squads, ready check, held slots, fill-squad queue
+  social.js             friends, requests, presence, recent raiders, invites
+  hub.js                walkable hub instances (10 Hz, 24 cap, squad/friends placed together)
   profiles.js           hideout economy + raid result application
   storage.js            Postgres or JSON-file profile store
 test/smoke.js           logic tests + networked bot test

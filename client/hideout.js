@@ -9,18 +9,13 @@ export class Hideout {
   constructor(net) {
     this.net = net;
     this.profile = null;
-    this.party = null;
     this.tab = 'loadout';
     this.leaderboard = [];
     $('#tabs').addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-tab]');
       if (!b) return;
-      this.tab = b.dataset.tab;
-      for (const x of $('#tabs').children) x.classList.toggle('active', x === b);
-      if (this.tab === 'record') this.loadLeaderboard();
-      this.render();
+      this.selectTab(b.dataset.tab);
     });
-    $('#deploy').addEventListener('click', () => this.deploy());
     $('#tab-body').addEventListener('click', (ev) => this.onClick(ev));
     setInterval(() => { if (this.tab === 'loadout' && this.profile?.insuranceClaims?.length) this.render(); }, 15000);
   }
@@ -31,20 +26,6 @@ export class Hideout {
     this.profile = p;
     for (const n of notes ?? []) toast(n);
     this.render();
-  }
-  setParty(party) { this.party = party; this.render(); }
-
-  deploy() {
-    const p = this.profile;
-    if (!p) return;
-    if (this.party && this.party.leader !== p.id) return toast('Only the squad leader can deploy', true);
-    if (!p.loadout.primary && !p.loadout.secondary && !confirm('You have no weapon equipped. Deploy anyway?')) return;
-    const risk = [p.loadout.primary, p.loadout.secondary, p.loadout.shield, p.loadout.rig, ...p.loadout.pack]
-      .filter(Boolean).reduce((a, s) => a + sellPrice(s.id) * s.qty, 0);
-    if (risk > 8000 && !confirm(`You're taking ${money(risk)} of gear topside. Everything outside your safe pocket is lost if you die. Deploy?`)) return;
-    this.net.send({ t: 'deploy' });
-    $('#deploy').disabled = true;
-    setTimeout(() => { $('#deploy').disabled = false; }, 3000);
   }
 
   async loadLeaderboard() {
@@ -59,11 +40,33 @@ export class Hideout {
     $('#h-level').textContent = `LVL ${p.level}` + (p.skillPoints ? ` · ${p.skillPoints} skill pt` : '');
     $('#h-xp').style.width = Math.min(100, p.xp / xpToNext(p.level) * 100) + '%';
     $('#h-cash').textContent = money(p.cash);
-    $('#h-squad-mini').innerHTML = this.party
-      ? `Squad <b>${esc(this.party.code)}</b>: ${this.party.members.map(m => esc(m.name) + (m.id === this.party.leader ? ' ★' : '') + (m.inRaid ? ' (in raid)' : '')).join(', ')}`
-      : 'Solo — form a squad in the Squad tab';
+    this.renderTopbar();
     const body = $('#tab-body');
+    // keep whatever the player was typing in squad/friend inputs across re-renders
+    const keep = {};
+    for (const el of body.querySelectorAll('input[id]')) keep[el.id] = el.value;
+    const focus = document.activeElement?.id;
     body.innerHTML = this['tab_' + this.tab]?.(p) ?? '';
+    for (const [id, v] of Object.entries(keep)) { const el = body.querySelector('#' + id); if (el) el.value = v; }
+    if (focus) body.querySelector('#' + focus)?.focus();
+  }
+
+  renderTopbar() {
+    const party = this.social?.party;
+    $('#h-squad-mini').innerHTML = party
+      ? `Squad <b class="code">${esc(party.code)}</b>: ${party.members.map(m => esc(m.name) + (m.id === party.leader ? ' ★' : '') + (m.ready ? ' ✓' : '')).join(', ')}`
+      : 'Solo — squad up in the Squad &amp; Friends tab';
+    const pr = this.social?.primary();
+    if (pr) { const b = $('#deploy'); b.textContent = pr.label; b.className = 'btn deploy ' + pr.cls; }
+  }
+
+  selectTab(tab) {
+    if (!tab || !this['tab_' + tab]) return;
+    this.tab = tab;
+    for (const x of $('#tabs').children) x.classList.toggle('active', x.dataset.tab === tab);
+    if (tab === 'record') this.loadLeaderboard();
+    if (tab === 'squad') this.social?.requestFriends();
+    this.render();
   }
 
   // ---------------------------------------------------------------- tabs
@@ -170,18 +173,10 @@ export class Hideout {
       <div class="tree">${tree('survival', 'Survival')}${tree('mobility', 'Mobility')}${tree('conditioning', 'Conditioning')}</div>`;
   }
 
-  tab_squad(p) {
-    const party = this.party;
-    if (!party) {
-      return `<div class="panel" style="max-width:520px"><h3>Squad up (max ${C.MAX_SQUAD})</h3>
-        <p class="cost">Squads deploy together, can revive each other when downed, and share a squad chat. Raids hold up to ${C.MAX_PLAYERS_PER_RAID} raiders (PvPvE).</p>
-        <div class="row"><button class="btn primary" data-party="create">Create squad</button></div>
-        <div class="row"><input id="party-code" placeholder="CODE" maxlength="5" style="padding:8px;background:#000;border:1px solid var(--line);color:#fff;text-transform:uppercase;width:120px"> <button class="btn" data-party="join">Join squad</button></div></div>`;
-    }
-    return `<div class="panel" style="max-width:520px"><h3>Squad ${esc(party.code)}</h3>
-      <p class="cost">Share the code <b style="font-size:20px;color:var(--accent2)">${esc(party.code)}</b> with friends. The leader (★) deploys everyone.</p>
-      ${party.members.map(m => `<div class="row"><div class="grow">${esc(m.name)} ${m.id === party.leader ? '★' : ''}</div><div class="cost">LVL ${m.level}${m.inRaid ? ' · in raid' : ''}${m.online ? '' : ' · offline'}</div></div>`).join('')}
-      <div class="row"><button class="btn" data-party="leave">Leave squad</button></div></div>`;
+  tab_squad() {
+    if (!this.social) return '';
+    return `<div class="soc-cols"><div class="panel">${this.social.partyHTML()}</div><div class="panel">${this.social.friendsHTML()}</div></div>
+      <p class="cost">Squads stay together between raids and through disconnects (5 min). If the leader deploys without you, your slot is held for 5 minutes — hit JOIN SQUAD. Dead or extracted? You can spectate squadmates who are still topside.</p>`;
   }
 
   tab_record(p) {
@@ -209,6 +204,9 @@ export class Hideout {
         <li><b>Vaults:</b> Depot, Old Mall and Reactor Yard have locked vaults. Find or buy the key.</li>
         <li><b>Wanted:</b> kill ${C.WANTED_KILLS} raiders and your position is revealed to everyone. Killing a Wanted raider pays a bounty.</li>
         <li><b>Free Kit:</b> broke? Grab a free random kit. Nothing to lose.</li>
+        <li><b>Squads:</b> up to ${C.MAX_SQUAD}. Share your invite link or add friends by <b>Name#TAG</b>. Squads stay together between raids. Members ready up, then the leader deploys. If you're left behind, your slot is held for 5 minutes: hit <b>JOIN SQUAD</b> to drop in next to them. <b>Fill squad</b> matches solos together.</li>
+        <li><b>The Cheap Seats:</b> walk the hub with other raiders. Use the stations (E) for your stash, trader, workbench and so on. Stand in <b>The Lift</b> to ready up or deploy. Prefer menus? Switch to <b>Menu mode</b>.</li>
+        <li><b>Spectate:</b> dead or extracted while squadmates are still topside? Watch them until they're out.</li>
       </ul>
       <p><b>Controls:</b> <kbd>WASD</kbd> move · <kbd>Shift</kbd> sprint · <kbd>C</kbd> crouch · <kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> ADS · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd> weapons · <kbd>E</kbd> interact/search/revive ·
       <kbd>Q</kbd> bandage/medkit · <kbd>Z</kbd> shield cell · <kbd>G</kbd> frag · <kbd>T</kbd> lure · <kbd>X</kbd> tourniquet (downed) · <kbd>Tab</kbd> inventory · <kbd>M</kbd> map · <kbd>F</kbd> ping · <kbd>V</kbd> swap shoulder · <kbd>Enter</kbd> chat</p></div>`;
@@ -217,7 +215,7 @@ export class Hideout {
   // ---------------------------------------------------------------- clicks
   onClick(ev) {
     const t = ev.target;
-    const d = t.closest('[data-act],[data-buy],[data-sell],[data-craft],[data-recycle],[data-skill],[data-cclaim],[data-creroll],[data-party],[data-claim],[data-rename]');
+    const d = t.closest('[data-act],[data-buy],[data-sell],[data-craft],[data-recycle],[data-skill],[data-cclaim],[data-creroll],[data-claim],[data-rename]');
     if (d) {
       const ds = d.dataset;
       if (ds.act) return this.act(ds.act);
@@ -230,9 +228,6 @@ export class Hideout {
       if (ds.creroll) return this.act('contract_reroll', { i: +ds.creroll });
       if (ds.claim) return this.act('claim_insurance', { i: +ds.claim, expedite: true });
       if (ds.rename) return this.net.send({ t: 'rename', name: $('#rename').value });
-      if (ds.party === 'create') return this.net.send({ t: 'party_create' });
-      if (ds.party === 'join') return this.net.send({ t: 'party_join', code: $('#party-code').value });
-      if (ds.party === 'leave') return this.net.send({ t: 'party_leave' });
     }
     const el = t.closest('.item[data-src]');
     if (!el || !el.dataset.src || this.tab !== 'loadout') return;

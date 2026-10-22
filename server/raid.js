@@ -37,6 +37,8 @@ export class Raid {
     this.closed = false;
     this.everJoined = false;
     this.usedSpawns = new Set();
+    this.reserved = new Map();    // pid -> { squad, until } — slots held for squadmates left behind
+    this.squadSpawn = new Map();  // squadId -> spawn site (late squad joiners land with their squad)
 
     // containers: static (from world gen) + dynamic (bodies, wrecks, dropped bags)
     this.containers = new Map();
@@ -63,8 +65,15 @@ export class Raid {
     return n;
   }
   canJoin(n) {
-    return !this.closed && this.time < C.JOIN_WINDOW && this.players.size + n <= C.MAX_PLAYERS_PER_RAID;
+    return !this.closed && this.time < C.JOIN_WINDOW && this.players.size + this.activeReservations() + n <= C.MAX_PLAYERS_PER_RAID;
   }
+  activeReservations() {
+    const now = Date.now();
+    let n = 0;
+    for (const [pid, r] of this.reserved) { if (r.until > now && !this.players.has(pid)) n++; else this.reserved.delete(pid); }
+    return n;
+  }
+  reserve(pid, squad, until) { this.reserved.set(pid, { squad, until }); }
 
   // ------------------------------------------------------------------ loot
   rollLoot(type, threat = 1) {
@@ -141,7 +150,10 @@ export class Raid {
 
   // ------------------------------------------------------------------ players
   addPlayer(profile, deploy, ws, squadId, spawnHint) {
-    const sp = spawnHint ?? this.pickSpawn();
+    const late = this.squadSpawn.has(squadId);
+    const sp = spawnHint ?? this.squadSpawn.get(squadId) ?? this.pickSpawn();
+    if (!late) this.squadSpawn.set(squadId, sp);
+    this.reserved.delete(profile.id);
     const p = {
       id: profile.id, nid: this.nextNid++, name: profile.name, squad: squadId, ws,
       x: sp.x + randRange(this.rng, -2, 2), z: sp.z + randRange(this.rng, -2, 2), yaw: 0, pitch: 0,
@@ -153,6 +165,7 @@ export class Raid {
       kills: { total: 0 }, pkills: 0, xp: 0, visited: new Set(), wanted: false, bounty: 0,
       hist: [], lastPosWall: performance.now() / 1000, noiseT: 0, awareness: 0, invDirty: true, openCont: null,
       deployInfo: deploy, joinedAt: this.time, msgCount: 0, msgWindow: 0, lastHitBy: null,
+      met: new Map(), spec: null,
     };
     p.maxHp = C.BASE_HP + 10 * skillRank(p, 'tough');
     p.hp = p.maxHp;
@@ -161,7 +174,16 @@ export class Raid {
     this.players.set(p.id, p);
     this.everJoined = true;
     this.sendStart(p);
+    // tell everyone about the newcomer's name; squadmates get the updated roster
+    this.broadcast({ t: 'names', add: [[p.nid, p.name]] }, o => o !== p);
+    const squad = this.squadRoster(p.squad);
+    this.broadcast({ t: 'squad', squad }, o => o !== p && o.squad === p.squad);
+    if (late) this.broadcast({ t: 'msg', text: `${p.name} dropped in to join the squad`, kind: 'info' }, o => o !== p && o.squad === p.squad);
     return { player: p, spawn: sp };
+  }
+
+  squadRoster(squadId) {
+    return [...this.players.values()].filter(o => o.squad === squadId).map(o => ({ nid: o.nid, name: o.name }));
   }
 
   pickSpawn() {
@@ -196,7 +218,7 @@ export class Raid {
   }
 
   sendStart(p) {
-    const squad = [...this.players.values()].filter(o => o.squad === p.squad).map(o => ({ nid: o.nid, name: o.name }));
+    const squad = this.squadRoster(p.squad);
     const names = [...this.players.values()].map(o => [o.nid, o.name]);
     this.send(p, {
       t: 'raid_start', raid: this.id, nid: p.nid, x: p.x, z: p.z, yaw: p.yaw, time: this.time, duration: C.RAID_DURATION,
@@ -217,13 +239,23 @@ export class Raid {
     const s = JSON.stringify(msg);
     for (const p of this.players.values()) {
       if (!p.ws || p.ws.readyState !== 1) continue;
-      if (p.state !== 'alive' && p.state !== 'downed') continue;
+      if (p.state !== 'alive' && p.state !== 'downed' && !p.spec) continue;
       if (filter && !filter(p)) continue;
       p.ws.send(s);
     }
   }
   broadcastNear(x, z, range, msg) {
-    this.broadcast(msg, p => Math.hypot(p.x - x, p.z - z) < range);
+    this.broadcast(msg, p => { const v = this.viewPos(p); return Math.hypot(v.x - x, v.z - z) < range; });
+  }
+  // where a client's "camera" is: their own raider, or the squadmate they're spectating
+  viewPos(p) {
+    if (p.spec) { const t = this.nidMap().get(p.spec); if (t) return t; }
+    return p;
+  }
+  nidMap() {
+    const m = new Map();
+    for (const o of this.players.values()) m.set(o.nid, o);
+    return m;
   }
   msg(p, text, kind = 'info') { this.send(p, { t: 'msg', text, kind }); }
 
@@ -700,6 +732,10 @@ export class Raid {
     }
     o.hp -= hpDmg;
     o.lastHitBy = src.kind === 'player' ? src.p : null;
+    if (src.kind === 'player' && src.p !== o) {
+      if (!o.met.has(src.p.id)) o.met.set(src.p.id, 'fought');
+      if (!src.p.met.has(o.id)) src.p.met.set(o.id, 'fought');
+    }
     this.send(o, { t: 'dmg', x: r1(src.x ?? o.x), z: r1(src.z ?? o.z), d: Math.round(amount) });
     if (o.action && o.action.k === 'search') o.action = null;
     if (o.hp <= 0) {
@@ -739,6 +775,8 @@ export class Raid {
     o.inv = { primary: null, secondary: null, shield: null, rig: null, pack: [], safe };
     if (killer && killer !== o) {
       killer.pkills++;
+      killer.met.set(o.id, 'you killed');
+      o.met.set(killer.id, 'killed you');
       killer.kills.total++;
       killer.xp += 150;
       if (o.wanted) { killer.bounty += C.WANTED_BOUNTY; this.msg(killer, `Wanted target eliminated: +$${C.WANTED_BOUNTY} bounty on extract`); }
@@ -769,10 +807,34 @@ export class Raid {
       inv: extracted ? p.inv : { primary: null, secondary: null, shield: null, rig: null, pack: [], safe: p.inv.safe },
       xp: p.xp, kills: p.kills, pkills: p.pkills, visited: [...p.visited], bounty: extracted ? p.bounty : 0,
       duration: Math.round(this.time - p.joinedAt),
+      met: [],
     };
+    for (const o of this.players.values()) if (o !== p && o.squad === p.squad) p.met.set(o.id, 'squad');
+    res.met = [...p.met].map(([id, how]) => ({ id, how }));
     this.hooks.onResult(p.id, res, p.deployInfo).then(report => {
-      this.send(p, { t: 'raid_end', extracted, how, report });
+      const canSpectate = !!this.nextSpecTarget(p);
+      this.send(p, { t: 'raid_end', extracted, how, report, canSpectate });
     }).catch(e => console.error('[raid] onResult failed', e));
+  }
+
+  // ------------------------------------------------------------------ spectating (after death/extract)
+  nextSpecTarget(p, after = null) {
+    const mates = [...this.players.values()].filter(o => o !== p && o.squad === p.squad && this.inRaid(o));
+    if (!mates.length) return null;
+    const i = mates.findIndex(o => o.nid === after);
+    return mates[(i + 1) % mates.length];
+  }
+
+  spectate(pid, on, ws, next = false) {
+    const p = this.players.get(pid);
+    if (!p || this.inRaid(p) || this.closed) return false;
+    if (ws) p.ws = ws;
+    if (!on) { p.spec = null; return true; }
+    const t = this.nextSpecTarget(p, next ? p.spec : null);
+    if (!t) { p.spec = null; this.send(p, { t: 'spec_end' }); return false; }
+    p.spec = t.nid;
+    this.send(p, { t: 'spec', nid: t.nid, name: t.name, time: this.time });
+    return true;
   }
 
   damageEnemy(e, dmg, src) {
@@ -1210,14 +1272,28 @@ export class Raid {
   sendSnapshots() {
     const players = [...this.players.values()].filter(p => this.inRaid(p));
     const wanted = players.filter(p => p.wanted).map(p => [p.nid, r1(p.x), r1(p.z)]);
-    for (const p of players) {
+    const byNid = this.nidMap();
+    for (const p of this.players.values()) {
       if (!p.ws || p.ws.readyState !== 1) continue;
-      if (p.invDirty) this.sendInv(p);
+      const live = this.inRaid(p);
+      if (!live && !p.spec) continue;
+      let v = p;
+      if (!live) {
+        v = byNid.get(p.spec);
+        if (!v || !this.inRaid(v)) {
+          const nt = this.nextSpecTarget(p, p.spec);
+          p.spec = nt ? nt.nid : null;
+          this.send(p, nt ? { t: 'spec', nid: nt.nid, name: nt.name, time: this.time } : { t: 'spec_end' });
+          if (!nt) continue;
+          v = nt;
+        }
+      }
+      if (live && p.invDirty) this.sendInv(p);
       const ps = [];
       for (const o of players) {
         if (o === p) continue;
         const sq = o.squad === p.squad;
-        if (!sq && Math.hypot(o.x - p.x, o.z - p.z) > C.AOI_RANGE) continue;
+        if (!sq && Math.hypot(o.x - v.x, o.z - v.z) > C.AOI_RANGE) continue;
         const flags = (o.crouch ? 1 : 0) | (o.sprint ? 2 : 0) | (o.ads ? 4 : 0) | (o.state === 'downed' ? 8 : 0) |
           (o.wanted ? 16 : 0) | (o.reloading ? 32 : 0) | (o.action ? 64 : 0) | (sq ? 128 : 0) | (o.moving ? 256 : 0);
         const wi = o.inv[o.active] ? WEAPON_KEYS.indexOf(o.inv[o.active].id) : -1;
@@ -1225,9 +1301,13 @@ export class Raid {
       }
       const es = [];
       for (const e of this.enemies.values()) {
-        if (Math.hypot(e.x - p.x, e.z - p.z) > C.AOI_RANGE) continue;
+        if (Math.hypot(e.x - v.x, e.z - v.z) > C.AOI_RANGE) continue;
         const st = e.state === 'combat' ? 2 : e.state === 'investigate' ? 1 : 0;
         es.push([e.id, ENEMY_KEYS.indexOf(e.type), r2(e.x), r2(e.y), r2(e.z), r2(e.yaw), st, Math.round(e.hp / e.d.hp * 100)]);
+      }
+      if (!live) {
+        this.send(p, { t: 's', tm: r2(this.time), p: ps, e: es, me: { s: 'spec', tgt: v.nid }, w: wanted.length ? wanted : undefined });
+        continue;
       }
       const wpn = this.weapon(p);
       const me = {
@@ -1244,6 +1324,7 @@ export class Raid {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.interval);
+    for (const p of this.players.values()) if (p.spec) { p.spec = null; this.send(p, { t: 'spec_end' }); }
     this.hooks.onClosed(this);
   }
 

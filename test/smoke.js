@@ -112,47 +112,128 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   ok(hp.insured.uid === hp.loadout.primary.uid, 'insure works');
 }
 
+// ---------------------------------------------------------------- spectating (in-process)
+{
+  const world = generateWorld();
+  const raid = new Raid(world, { onResult: async () => ({}), onClosed() {} });
+  clearInterval(raid.interval);
+  const mk = () => { const m = []; return { readyState: 1, send: (s) => m.push(JSON.parse(s)), msgs: m }; };
+  const pa = newProfile('SpecA'), pb = newProfile('SpecB');
+  const wa = mk(), wb = mk();
+  const { player: a } = raid.addPlayer(pa, prepareDeploy(pa, raid.id), wa, 'SQ');
+  const { player: b } = raid.addPlayer(pb, prepareDeploy(pb, raid.id), wb, 'SQ');
+  ok(wa.msgs.some(m => m.t === 'squad' && m.squad.length === 2), 'squadmate roster pushed to existing member');
+  raid.enemies.clear();
+  // A dies for good (B alive -> A goes down first, then finish them)
+  raid.damagePlayer(a, 999, { kind: 'enemy', name: 'Test', x: 0, z: 0 });
+  ok(a.state === 'downed', 'player with a living squadmate is downed, not killed');
+  raid.damagePlayer(a, 999, { kind: 'enemy', name: 'Test', x: 0, z: 0 });
+  ok(a.state === 'dead', 'downed player can be finished');
+  ok(raid.spectate(pa.id, true, wa), 'dead player can spectate squadmate');
+  wa.msgs.length = 0;
+  raid.tick();
+  const snap = wa.msgs.find(m => m.t === 's');
+  ok(snap && snap.me.s === 'spec' && snap.me.tgt === b.nid, 'spectator receives snapshots centred on squadmate');
+  raid.close();
+  ok(wa.msgs.some(m => m.t === 'spec_end'), 'spectators are told when the raid closes');
+}
+
 // ---------------------------------------------------------------- networked bots
 {
   const port = 3900 + Math.floor(Math.random() * 90);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmcheap-'));
-  const srv = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, DATABASE_URL: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const srv = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, DATABASE_URL: process.env.TEST_DATABASE_URL ?? '', FILL_WAIT_MS: '1500' }, stdio: ['ignore', 'pipe', 'pipe'] });
   srv.stderr.on('data', d => process.stderr.write('[srv] ' + d));
   await sleep(1200);
-  const bot = (name) => new Promise((resolve) => {
+  const bot = (name, token) => new Promise((resolve) => {
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
-    const b = { ws, msgs: [], name, send: (m) => ws.send(JSON.stringify(m)), wait: async (pred, ms = 4000) => { const t = Date.now(); while (Date.now() - t < ms) { const m = b.msgs.find(pred); if (m) return m; await sleep(25); } return null; } };
-    ws.on('message', (d) => b.msgs.push(JSON.parse(d)));
-    ws.on('open', () => { b.send({ t: 'hello', name }); resolve(b); });
+    const b = {
+      ws, msgs: [], name, token: null, id: null, tag: null,
+      send: (m) => ws.send(JSON.stringify(m)),
+      clear: () => { b.msgs.length = 0; },
+      wait: async (pred, ms = 4000) => { const t = Date.now(); while (Date.now() - t < ms) { const m = b.msgs.find(pred); if (m) return m; await sleep(25); } return null; },
+      last: (pred) => [...b.msgs].reverse().find(pred),
+    };
+    ws.on('message', (d) => { const m = JSON.parse(d); b.msgs.push(m); if (m.t === 'welcome') { b.token = m.token; b.id = m.id; b.tag = m.tag; } });
+    ws.on('open', () => { b.send({ t: 'hello', name, token }); resolve(b); });
   });
   const A = await bot('Alpha'), B = await bot('Bravo');
-  ok(!!(await A.wait(m => m.t === 'profile')), 'bot A got profile');
+  ok(!!(await A.wait(m => m.t === 'profile')) && !!(await B.wait(m => m.t === 'profile')), 'bots got profiles');
+
+  // ---- squads persist through disconnects
   A.send({ t: 'party_create' });
-  const party = await A.wait(m => m.t === 'party');
+  const party = await A.wait(m => m.t === 'party' && m.party);
   ok(!!party, `party created ${party?.party.code}`);
   B.send({ t: 'party_join', code: party.party.code });
-  ok(!!(await B.wait(m => m.t === 'party' && m.party.members.length === 2)), 'bot B joined party');
+  ok(!!(await A.wait(m => m.t === 'party' && m.party?.members.length === 2)), 'B joined via code');
+  B.ws.close();
+  await sleep(300);
+  const off = A.last(m => m.t === 'party');
+  ok(off?.party.members.find(x => x.id === B.id)?.status.s === 'offline', 'disconnected member stays in squad as offline');
+  const B2 = await bot('Bravo', B.token);
+  const back = await B2.wait(m => m.t === 'party' && m.party);
+  ok(back && back.party.code === party.party.code, 'reconnecting member is back in the same squad');
+
+  // ---- friends + presence
+  A.send({ t: 'friend_add', tag: `Bravo#${B.tag}` });
+  ok(!!(await B2.wait(m => m.t === 'notice' && /friend request/.test(m.text))), 'friend request delivered');
+  B2.send({ t: 'friend_accept', id: A.id });
+  const fl = await B2.wait(m => m.t === 'friends' && m.friends.length === 1);
+  ok(fl && fl.friends[0].id === A.id && fl.friends[0].status.s !== 'offline', 'friends list shows online friend');
+
+  // ---- walkable hub
+  A.send({ t: 'hub_enter' }); B2.send({ t: 'hub_enter' });
+  const ha = await A.wait(m => m.t === 'hub_start'), hb = await B2.wait(m => m.t === 'hub_start');
+  ok(ha && hb && ha.inst === hb.inst, 'squadmates placed in the same hub instance');
+  A.send({ t: 'hin', x: ha.x + 0.3, z: ha.z, yaw: 0 });
+  await sleep(250);
+  const hs = B2.last(m => m.t === 'hub_s');
+  ok(hs && hs.p.length === 2, 'hub snapshots include both raiders');
+  B2.send({ t: 'hub_chat', text: 'yo' });
+  ok(!!(await A.wait(m => m.t === 'hub_chat' && m.text === 'yo')), 'hub chat relayed');
+  B2.send({ t: 'emote', e: 'wave' });
+  await sleep(250);
+  ok(A.last(m => m.t === 'hub_s')?.p.some(r => r[5] === 0), 'emote visible to others');
+
+  // ---- ready check + deploy without someone + reserved slot + join squad
+  B2.send({ t: 'party_ready', ready: true });
+  ok(!!(await A.wait(m => m.t === 'party' && m.party?.members.find(x => x.id === B.id)?.ready)), 'ready state shared');
+  B2.send({ t: 'act', a: 'free_kit' });
+  ok(!!(await B2.wait(m => m.t === 'err' && /Unready/.test(m.msg))), 'ready locks loadout changes');
+  B2.send({ t: 'party_ready', ready: false });
+  await sleep(150);
+  A.clear(); B2.clear();
   A.send({ t: 'deploy' });
-  const sa = await A.wait(m => m.t === 'raid_start'), sb = await B.wait(m => m.t === 'raid_start');
-  ok(sa && sb && sa.raid === sb.raid, 'squad deployed into the same raid');
-  ok(sa && Math.hypot(sa.x - sb.x, sa.z - sb.z) < 8, 'squad spawned together');
-  const snap = await A.wait(m => m.t === 's' && m.p.length >= 1);
-  ok(!!snap, `snapshots flowing (sees ${snap?.p.length} players, ${snap?.e.length} enemies)`);
-  // walk a few steps
-  let x = sa.x, z = sa.z;
-  for (let i = 0; i < 20; i++) { z += 0.2; A.send({ t: 'in', x, z, yaw: 0, pitch: 0 }); await sleep(50); }
-  const later = B.msgs.filter(m => m.t === 's').pop();
-  const seenA = later?.p.find(p => p[0] === sa.nid);
-  ok(seenA && Math.abs(seenA[2] - z) < 1.5, 'squadmate sees movement');
-  A.send({ t: 'fire', d: [[0, 0, 1]], rt: 0 });
-  ok(!!(await B.wait(m => m.t === 'fx' && m.k === 'shot')), 'shot fx relayed');
+  const conf = await A.wait(m => m.t === 'deploy_confirm');
+  ok(conf && conf.missing.includes('Bravo'), 'leader warned that Bravo is not ready');
+  A.send({ t: 'deploy', force: true });
+  const sa = await A.wait(m => m.t === 'raid_start');
+  ok(!!sa, 'leader deployed');
+  const pv = await B2.wait(m => m.t === 'party' && m.party?.joinUntil);
+  ok(!!pv, 'left-behind member gets a held slot (JOIN SQUAD)');
+  B2.send({ t: 'join_squad' });
+  const sb = await B2.wait(m => m.t === 'raid_start');
+  ok(sb && sb.raid === sa.raid && sb.squad.length === 2, 'late member dropped into the same raid & squad');
+  ok(sb && Math.hypot(sa.x - sb.x, sa.z - sb.z) < 8, 'late member spawned with squad');
+  ok(!!(await A.wait(m => m.t === 'squad' && m.squad.length === 2)), 'existing member gets roster update');
+  const st = await A.wait(m => m.t === 's' && m.p.length >= 1);
+  ok(!!st, `snapshots flowing (sees ${st?.p.length} players, ${st?.e.length} enemies)`);
   A.send({ t: 'chat', ch: 'squad', text: 'hello squad' });
-  ok(!!(await B.wait(m => m.t === 'chat' && m.text === 'hello squad')), 'squad chat works');
+  ok(!!(await B2.wait(m => m.t === 'chat' && m.text === 'hello squad')), 'squad chat works in raid');
+
+  // ---- fill squad: two solos get grouped
+  const E = await bot('Echo'), F = await bot('Fox');
+  await E.wait(m => m.t === 'profile'); await F.wait(m => m.t === 'profile');
+  E.send({ t: 'deploy', fill: true }); F.send({ t: 'deploy', fill: true });
+  ok(!!(await E.wait(m => m.t === 'fill' && m.searching)), 'fill search started');
+  const se = await E.wait(m => m.t === 'raid_start', 6000), sf = await F.wait(m => m.t === 'raid_start', 6000);
+  ok(se && sf && se.raid === sf.raid && sf.squad.length === 2, 'fill squad grouped two solos into one squad');
+
   const stats = await (await fetch(`http://localhost:${port}/api/stats`)).json();
-  ok(stats.raids.length === 1 && stats.raids[0].players === 2, 'stats endpoint reports raid');
+  ok(stats.raids.reduce((a, r) => a + r.players, 0) === 4, `stats report 4 raiders topside (${JSON.stringify(stats.raids)})`);
   const bytes = A.msgs.filter(m => m.t === 's').map(m => JSON.stringify(m).length);
-  console.log(`     avg snapshot ${Math.round(bytes.reduce((a, b) => a + b, 0) / bytes.length)} bytes (pre-deflate)`);
-  A.ws.close(); B.ws.close();
+  console.log(`     avg snapshot ${Math.round(bytes.reduce((a, b) => a + b, 0) / Math.max(1, bytes.length))} bytes (pre-deflate)`);
+  for (const b of [A, B2, E, F]) b.ws.close();
   srv.kill('SIGTERM');
   await sleep(300);
 }

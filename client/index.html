@@ -21,7 +21,32 @@
     </div>
   </section>
 
-  <!-- ============ HIDEOUT ============ -->
+  <!-- ============ WALKABLE HUB ============ -->
+  <section id="hub" class="screen hidden">
+    <canvas id="hubview"></canvas>
+    <div id="hubhud">
+      <div id="hub-top">
+        <div class="logo small">DM<span>CHEAP</span></div>
+        <div class="who"><div id="hub-name" class="name"></div><div class="lvl" id="hub-level"></div></div>
+        <div class="cash" id="hub-cash"></div>
+        <div class="grow"></div>
+        <span class="cost" id="hub-inst"></span>
+        <button class="btn small" data-hub="terminal" title="Tab / I">Terminal (Tab)</button>
+        <button class="btn small" data-hub="friends" title="O">Friends (O)</button>
+        <button class="btn small" data-hub="menu-mode" title="Skip the walkable hub">Menu mode</button>
+      </div>
+      <div id="hub-party" class="hub-panel"></div>
+      <div id="hub-friends" class="hub-panel hidden"></div>
+      <button id="hub-primary" class="btn deploy" data-soc="primary"></button>
+      <div id="hub-chatlog"></div>
+      <input id="hub-chatin" class="hidden" maxlength="140" placeholder="Hub chat (Enter) — start with /p for squad chat">
+      <div id="hub-prompt"></div>
+      <div id="hub-help">WASD move · Shift run · E use · 1–5 emotes · Enter chat · Tab terminal · O friends</div>
+      <div id="hub-click" class="hidden">Click to walk around</div>
+    </div>
+  </section>
+
+  <!-- ============ HIDEOUT (menus; full screen in menu mode, overlay over the hub otherwise) ============ -->
   <section id="hideout" class="screen hidden">
     <header class="topbar">
       <div class="logo small">DM<span>CHEAP</span></div>
@@ -31,7 +56,9 @@
       </div>
       <div class="cash" id="h-cash"></div>
       <div class="squad-mini" id="h-squad-mini"></div>
-      <button id="deploy" class="btn deploy">DEPLOY TOPSIDE</button>
+      <button id="h-mode" class="btn small" title="Switch between the walkable hub and menus">Walk the hub</button>
+      <button id="deploy" class="btn deploy" data-soc="primary">DEPLOY TOPSIDE</button>
+      <button id="h-close" class="btn small hidden" title="Back to the hub (Esc)">✕ Close</button>
     </header>
     <nav class="tabs" id="tabs">
       <button data-tab="loadout" class="active">Loadout &amp; Stash</button>
@@ -39,7 +66,7 @@
       <button data-tab="workbench">Workbench</button>
       <button data-tab="contracts">Contracts</button>
       <button data-tab="skills">Skills</button>
-      <button data-tab="squad">Squad</button>
+      <button data-tab="squad">Squad &amp; Friends</button>
       <button data-tab="record">Record</button>
       <button data-tab="howto">How to play</button>
     </nav>

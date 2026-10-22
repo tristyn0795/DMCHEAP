@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { C, ITEMS, WEAPONS, ENEMIES, POIS, ADS_SPREAD_MULT, MOVE_SPREAD_MULT, countItem } from '/shared/data.js';
 import { generateWorld, KIND, raycast, stepMove, poiAt, raySphere } from '/shared/world.js';
 import { $, esc, itemHTML, showMenu, hideMenu } from './ui.js';
+import { makeHuman as buildHuman, makeLabel as buildLabel, animHuman } from './models.js';
 
 const ENEMY_KEYS = Object.keys(ENEMIES);
 const WEAPON_KEYS = Object.keys(WEAPONS);
@@ -150,24 +151,7 @@ export class Game {
     if (m) { m.material.color.multiplyScalar(0.55); m.material.emissive.setHex(0x000000); }
   }
 
-  makeHuman(color, visor = 0xff8a2a) {
-    const g = new THREE.Group();
-    g.rotation.order = 'YXZ';
-    const mat = new THREE.MeshLambertMaterial({ color });
-    const dark = new THREE.MeshLambertMaterial({ color: 0x2a2622 });
-    const legGeo = new THREE.BoxGeometry(0.2, 0.8, 0.22); legGeo.translate(0, -0.4, 0);
-    const legL = new THREE.Mesh(legGeo, dark); legL.position.set(-0.13, 0.82, 0);
-    const legR = new THREE.Mesh(legGeo, dark); legR.position.set(0.13, 0.82, 0);
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.66, 0.32), mat); torso.position.y = 1.15;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 10), mat); head.position.y = 1.62;
-    const vis = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.08, 0.06), new THREE.MeshBasicMaterial({ color: visor })); vis.position.set(0, 1.64, -0.15);
-    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.5, 0.2), dark); pack.position.set(0, 1.18, 0.26);
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.5), mat); arm.position.set(0.22, 1.3, -0.25);
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.75), new THREE.MeshLambertMaterial({ color: 0x1e1e1e })); gun.position.set(0.22, 1.33, -0.55);
-    for (const m of [legL, legR, torso, head, pack, arm, gun]) m.castShadow = true;
-    g.add(legL, legR, torso, head, vis, pack, arm, gun);
-    return { group: g, legL, legR, gun, phase: 0 };
-  }
+  makeHuman(color, visor) { return buildHuman(color, visor); }
 
   makeEnemy(type) {
     const g = new THREE.Group();
@@ -197,7 +181,7 @@ export class Game {
     } else if (type === 'merc') {
       const h = this.makeHuman(0x55503f, 0xff3030);
       h.group.userData.human = h;
-      return { group: h.group, eyeMat: h.group.children[4].material, human: h };
+      return { group: h.group, eyeMat: h.visor.material, human: h };
     } else if (type === 'warden') {
       add(new THREE.BoxGeometry(3.4, 2.2, 4.0), new THREE.MeshLambertMaterial({ color: 0x5a4f45 }), 0, 3.2, 0);
       add(new THREE.BoxGeometry(1.4, 1.0, 1.4), metal, 0, 4.4, -1.6);
@@ -210,20 +194,7 @@ export class Game {
     return { group: g, eyeMat, rotors, core };
   }
 
-  makeLabel(text, color = '#ffc24b') {
-    const cv = document.createElement('canvas');
-    cv.width = 256; cv.height = 48;
-    const g = cv.getContext('2d');
-    g.font = 'bold 26px Segoe UI, sans-serif';
-    g.textAlign = 'center';
-    g.lineWidth = 5; g.strokeStyle = '#000';
-    g.strokeText(text, 128, 34);
-    g.fillStyle = color; g.fillText(text, 128, 34);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), depthTest: false, transparent: true }));
-    sp.scale.set(2.4, 0.45, 1);
-    sp.renderOrder = 10;
-    return sp;
-  }
+  makeLabel(text, color) { return buildLabel(text, color); }
 
   // ================================================================ raid lifecycle
   start(m) {
@@ -293,6 +264,10 @@ export class Game {
   }
 
   exit() {
+    if (this.spectating) this.net.send({ t: 'spectate', on: false });
+    this.spectating = false;
+    $('#spec-hud')?.remove();
+    $('#hud').classList.remove('spectating');
     this.active = false;
     document.exitPointerLock?.();
     $('#raid').classList.add('hidden');
@@ -395,6 +370,18 @@ export class Game {
       case 'revived': this.me.state = 'alive'; this.feed('Back on your feet'); return;
       case 'ping': this.addPing(m); return;
       case 'raid_end': return this.onEnd(m);
+      case 'names': for (const [nid, name] of m.add) this.names.set(nid, name); return;
+      case 'squad': this.squad = new Map(m.squad.map(x => [x.nid, x.name])); return;
+      case 'spec': this.specNid = m.nid; this.specName = m.name; this.spectating = true; $('#end').classList.add('hidden'); return;
+      case 'spec_end': {
+        if (!this.spectating) return;
+        this.spectating = false;
+        $('#spec-hud')?.remove();
+        $('#hud').classList.remove('spectating');
+        this.feed('Nobody left to spectate', 'warn');
+        this.showEnd(false);
+        return;
+      }
     }
   }
 
@@ -414,9 +401,15 @@ export class Game {
         const sq = !!(flags & 128);
         const h = this.makeHuman(sq ? 0x3d8ff0 : 0x7b6a58, sq ? 0x7ff0ff : 0xff8a2a);
         r = { nid, h, buf: [], name: this.names.get(nid) ?? '?', squad: sq };
-        if (sq) { r.label = this.makeLabel(this.squad.get(nid) ?? r.name, '#9fe0ff'); r.label.position.y = 2.25; h.group.add(r.label); }
         this.dynamic.add(h.group);
         this.remotes.set(nid, r);
+      }
+      if (r.squad) {
+        const nm = this.squad.get(nid) ?? this.names.get(nid) ?? r.name;
+        if (r.labelName !== nm) {
+          if (r.label) r.h.group.remove(r.label);
+          r.label = this.makeLabel(nm, '#9fe0ff'); r.label.position.y = 2.25; r.h.group.add(r.label); r.labelName = nm;
+        }
       }
       r.buf.push([m.tm, x, z, yaw, pitch]);
       if (r.buf.length > 30) r.buf.shift();
@@ -442,6 +435,7 @@ export class Game {
     }
     for (const [id, e] of this.enemies) if (!seenE.has(id)) { this.dynamic.remove(e.mk.group); this.enemies.delete(id); }
     const me = m.me;
+    if (me.s === 'spec') { this.specNid = me.tgt; this.wantedList = m.w ?? []; return; }
     Object.assign(this.me, { hp: me.hp, mhp: me.mhp, sh: me.sh, shc: me.shc, st: me.st, aw: me.aw, res: me.res, state: me.s, dh: me.dh, wanted: me.wanted });
     if (this.localMag == null || this.now - this.lastShot > 0.4) this.localMag = me.mag;
     this.wantedList = m.w ?? [];
@@ -516,6 +510,12 @@ export class Game {
   onEnd(m) {
     document.exitPointerLock?.();
     this.me.state = m.extracted ? 'extracted' : 'dead';
+    this.endMsg = m;
+    this.showEnd(!!m.canSpectate);
+  }
+
+  showEnd(canSpectate) {
+    const m = this.endMsg;
     const r = m.report ?? {};
     const el = $('#end');
     el.innerHTML = `<div class="card"><h2 class="${m.extracted ? 'ok' : 'bad'}">${m.extracted ? 'EXTRACTED' : 'KILLED IN ACTION'}</h2>
@@ -523,10 +523,29 @@ export class Game {
       <div class="kv"><b>XP earned</b><span>${r.xp ?? 0}</span><b>Loot value</b><span>$${(r.value ?? 0).toLocaleString()}</span>
       <b>Kills</b><span>${r.kills?.total ?? 0} (${r.pkills ?? 0} raiders)</span><b>Time topside</b><span>${Math.floor((r.duration ?? 0) / 60)}m ${(r.duration ?? 0) % 60}s</span></div>
       ${(r.notes ?? []).map(n => `<div class="cost">• ${esc(n)}</div>`).join('')}
-      <button class="btn big" id="end-back">Back to The Cheap Seats</button></div>`;
+      <div class="row">${canSpectate ? '<button class="btn big" id="end-spec" style="background:#59b8ff">Spectate squad</button>' : ''}
+      <button class="btn big" id="end-back">Back to The Cheap Seats</button></div></div>`;
     el.classList.remove('hidden');
     $('#inv').classList.add('hidden');
     $('#end-back').onclick = () => this.exit();
+    const sp = $('#end-spec');
+    if (sp) sp.onclick = () => { this.net.send({ t: 'spectate', on: true }); el.classList.add('hidden'); };
+  }
+
+  // follow cam for spectating a squadmate: borrow their interpolated pose
+  followSpectate() {
+    $('#hud').classList.add('spectating');
+    const r = this.remotes.get(this.specNid);
+    let hud = $('#spec-hud');
+    if (!hud) { hud = document.createElement('div'); hud.id = 'spec-hud'; $('#hud').appendChild(hud); }
+    hud.innerHTML = `SPECTATING <b>${esc(this.squad.get(this.specNid) ?? this.specName ?? '')}</b>${r ? ` · ${r.hp}% HP${r.flags & 8 ? ' · DOWNED' : ''}` : ''}<br><small><kbd>Space</kbd> next squadmate · <kbd>Esc</kbd> back to hub</small>`;
+    if (!r) return;
+    const s = this.sample(r.buf, this.serverNow - INTERP);
+    if (!s) return;
+    const me = this.me;
+    me.x = s[1]; me.z = s[2]; me.yaw = s[3]; me.pitch = s[4] * 0.6;
+    me.eye = r.flags & 8 ? 0.6 : r.flags & 1 ? C.EYE_CROUCH : C.EYE_STAND;
+    me.hp = r.hp; me.mhp = 100;
   }
 
   // ================================================================ effects
@@ -636,6 +655,11 @@ export class Game {
     if (!this.active) return;
     const k = e.code;
     if (k === 'Tab') { e.preventDefault(); if (down) this.toggleInv(); return; }
+    if (this.spectating) {
+      if (down && k === 'Space') this.net.send({ t: 'spectate', on: true, next: true });
+      if (down && k === 'Escape') this.exit();
+      return;
+    }
     if (k === 'Escape' && down) { this.closeOverlays(); return; }
     if (k === 'KeyM' && down && $('#chatin').classList.contains('hidden')) { this.toggleMap(); return; }
     if (!down) { this.keys.delete(k); return; }
@@ -860,6 +884,7 @@ export class Game {
 
   update(dt) {
     const me = this.me;
+    if (this.spectating) this.followSpectate();
     const W = this.currentWeapon();
     const alive = me.state === 'alive', downed = me.state === 'downed';
     const inControl = this.locked && (alive || downed);
@@ -907,7 +932,7 @@ export class Game {
     pg.position.set(me.x, 0, me.z);
     pg.rotation.set(0, me.yaw, 0);
     this.animHuman(this.player, moved, me.crouch, downed, speed, dt);
-    pg.visible = camDist > 0.8;
+    pg.visible = camDist > 0.8 && (alive || downed);
 
     // ---- shooting
     this.bloom = Math.max(0, this.bloom - dt * 3);
@@ -958,19 +983,7 @@ export class Game {
   }
 
   animHuman(h, moving, crouch, downed, speed, dt) {
-    const g = h.group;
-    if (downed) {
-      g.rotation.x = -Math.PI / 2 * 0.9;
-      g.position.y = 0.3;
-      g.scale.y = 1;
-      return;
-    }
-    g.rotation.x = 0;
-    g.scale.y = crouch ? 0.72 : 1;
-    if (moving) h.phase += dt * Math.min(12, 4 + speed * 1.3);
-    else h.phase *= 0.9;
-    const sw = Math.sin(h.phase) * (moving ? 0.6 : 0);
-    h.legL.rotation.x = sw; h.legR.rotation.x = -sw;
+    animHuman(h, { moving, crouch, downed, speed, dt, armed: true });
   }
 
   currentWeapon() {
@@ -1146,7 +1159,7 @@ export class Game {
     const dn = $('#downed');
     if (me.state === 'downed') { dn.classList.remove('hidden'); dn.innerHTML = `<div>DOWNED<br><small>Bleeding out in ${me.dh ?? '?'}s · crawl to cover · squadmates press E to revive<br><kbd>X</kbd> use Tourniquet</small></div>`; }
     else dn.classList.add('hidden');
-    $('#clickto').classList.toggle('hidden', this.locked || this.overlayOpen() || me.state === 'dead' || me.state === 'extracted');
+    $('#clickto').classList.toggle('hidden', this.locked || this.overlayOpen() || this.spectating || me.state === 'dead' || me.state === 'extracted');
     $('#wanted').classList.toggle('hidden', !me.wanted);
     // boss bar
     let boss = null;
