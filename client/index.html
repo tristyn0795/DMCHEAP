@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DMCHEAP</title>
+  <meta name="description" content="DMCHEAP — a browser third-person extraction shooter. Go topside, loot, get out.">
+  <link rel="stylesheet" href="/style.css">
+  <script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
+</head>
+<body>
+  <!-- ============ LOGIN ============ -->
+  <section id="login" class="screen">
+    <div class="login-card">
+      <h1 class="logo">DM<span>CHEAP</span></h1>
+      <p class="tag">Topside is cheap. Getting out isn't.</p>
+      <input id="login-name" maxlength="16" placeholder="Raider name" autocomplete="off">
+      <button id="login-go" class="btn big">Enter The Cheap Seats</button>
+      <p class="fine">Your raider is tied to this browser (a token in local storage). No password needed.</p>
+      <p id="login-status" class="fine"></p>
+    </div>
+  </section>
+
+  <!-- ============ HIDEOUT ============ -->
+  <section id="hideout" class="screen hidden">
+    <header class="topbar">
+      <div class="logo small">DM<span>CHEAP</span></div>
+      <div class="who">
+        <div id="h-name" class="name"></div>
+        <div class="lvl"><span id="h-level"></span><div class="xpbar"><div id="h-xp"></div></div></div>
+      </div>
+      <div class="cash" id="h-cash"></div>
+      <div class="squad-mini" id="h-squad-mini"></div>
+      <button id="deploy" class="btn deploy">DEPLOY TOPSIDE</button>
+    </header>
+    <nav class="tabs" id="tabs">
+      <button data-tab="loadout" class="active">Loadout &amp; Stash</button>
+      <button data-tab="trader">Trader</button>
+      <button data-tab="workbench">Workbench</button>
+      <button data-tab="contracts">Contracts</button>
+      <button data-tab="skills">Skills</button>
+      <button data-tab="squad">Squad</button>
+      <button data-tab="record">Record</button>
+      <button data-tab="howto">How to play</button>
+    </nav>
+    <main id="tab-body"></main>
+  </section>
+  <div id="toasts"></div>
+  <div id="ctx" class="ctx hidden"></div>
+
+  <!-- ============ RAID ============ -->
+  <section id="raid" class="screen hidden">
+    <canvas id="view"></canvas>
+    <div id="hud">
+      <div id="feed"></div>
+      <div id="topright">
+        <div id="timer"></div>
+        <div id="extracts"></div>
+      </div>
+      <div id="compass"><div id="heading"></div><div id="zone"></div></div>
+      <div id="crosshair"><i class="t"></i><i class="b"></i><i class="l"></i><i class="r"></i></div>
+      <div id="hitmarker"></div>
+      <div id="stealth"><div class="eye">◉</div><div class="bar"><div id="stealth-fill"></div></div></div>
+      <div id="dmg-ind"></div>
+      <div id="prompt"></div>
+      <div id="progress" class="hidden"><div id="progress-label"></div><div class="pbar"><div id="progress-fill"></div></div></div>
+      <div id="bottomleft">
+        <div id="squadhud"></div>
+        <div class="bars">
+          <div class="barrow"><label>SHIELD</label><div class="bar sh"><div id="b-sh"></div></div><span id="t-sh"></span></div>
+          <div class="barrow"><label>HEALTH</label><div class="bar hp"><div id="b-hp"></div></div><span id="t-hp"></span></div>
+          <div class="barrow"><label>STAMINA</label><div class="bar st"><div id="b-st"></div></div></div>
+        </div>
+      </div>
+      <div id="bottomright">
+        <div id="wname"></div>
+        <div id="ammo"></div>
+        <div id="quick"></div>
+      </div>
+      <div id="chatlog"></div>
+      <input id="chatin" class="hidden" maxlength="140" placeholder="Squad chat (Enter) — prefix / for proximity">
+      <div id="downed" class="hidden"></div>
+      <div id="clickto" class="hidden">Click to play</div>
+      <div id="wanted" class="hidden">WANTED</div>
+    </div>
+    <div id="inv" class="overlay hidden"></div>
+    <div id="mapov" class="overlay hidden"><canvas id="mapcv" width="800" height="800"></canvas><div class="maplegend">M to close · <b>F</b> pings for your squad</div></div>
+    <div id="end" class="overlay hidden"></div>
+  </section>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

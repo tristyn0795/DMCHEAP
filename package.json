@@ -1,0 +1,20 @@
+{
+  "name": "dmcheap",
+  "version": "0.1.0",
+  "description": "DMCHEAP - a browser-based third-person extraction shooter (PvPvE) sized to run on a single Railway service.",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "three": "0.160.0",
+    "ws": "^8.18.0"
+  }
+}
