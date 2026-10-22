@@ -5,6 +5,8 @@ import {
   C, ITEMS, WEAPONS, RECIPES, BENCH_UPGRADES, TRADER_STOCK, SKILLS, POIS, CONTRACT_GIVERS,
   makeStack, addToStacks, countItem, removeItem, buyPrice, sellPrice, xpToNext, skillRank,
 } from '../shared/data.js';
+import { ATTACHMENTS, AMMO_TYPES } from '../shared/data.js';
+import { weaponStats, canAttach, upgradeCost, repairCost, gunName, MAX_TIER } from '../shared/gunsmith.js';
 
 const SLOT_TYPES = { primary: 'weapon', secondary: 'weapon', shield: 'shield', rig: 'rig' };
 
@@ -157,6 +159,7 @@ export function applyAction(p, msg) {
     }
     case 'sell': {
       const s = stashItem(p, msg.idx);
+      stripAttachments(p, s, notes);
       const qty = Math.max(1, Math.min(s.qty, msg.qty | 0 || s.qty));
       if (s.uid && s.uid === p.insured.uid) p.insured.uid = null;
       p.cash += sellPrice(s.id) * qty;
@@ -168,7 +171,8 @@ export function applyAction(p, msg) {
       const s = stashItem(p, msg.idx);
       const rec = ITEMS[s.id].recycle;
       if (!rec) throw new Error("Can't recycle that");
-      p.stash.splice(msg.idx | 0, 1);
+      stripAttachments(p, s, notes);
+      p.stash.splice(p.stash.indexOf(s), 1);
       if (s.uid && s.uid === p.insured.uid) p.insured.uid = null;
       for (const [m, n] of Object.entries(rec)) toStash(p, makeStack(m, n * s.qty), notes);
       notes.push(`Recycled ${s.qty}x ${ITEMS[s.id].name}`);
@@ -205,6 +209,76 @@ export function applyAction(p, msg) {
       p.skillPoints--;
       break;
     }
+    // ---------------- gunsmith (5 slots, tiers, repair, loaded ammo)
+    case 'attach': {
+      const gun = findGun(p, msg.uid);
+      const a = stashItem(p, msg.idx);
+      const A = ATTACHMENTS[a.id];
+      if (!A) throw new Error('Not an attachment');
+      if (!canAttach(gun.id, a.id)) throw new Error(`${A.name} doesn't fit the ${gunName(gun)}`);
+      p.stash.splice(msg.idx | 0, 1);
+      gun.att ??= {};
+      const prev = gun.att[A.slot];
+      gun.att[A.slot] = a.id;
+      if (prev) toStash(p, makeStack(prev), notes);
+      clampMag(p, gun, notes);
+      notes.push(`${A.name} fitted to ${gunName(gun)}`);
+      break;
+    }
+    case 'detach': {
+      const gun = findGun(p, msg.uid);
+      const id = gun.att?.[msg.slot];
+      if (!id) throw new Error('Nothing in that slot');
+      delete gun.att[msg.slot];
+      toStash(p, makeStack(id), notes);
+      clampMag(p, gun, notes);
+      break;
+    }
+    case 'upgrade_gun': {
+      const gun = findGun(p, msg.uid);
+      const cost = upgradeCost(gun);
+      if (!cost) throw new Error(`Already tier ${MAX_TIER}`);
+      if (p.cash < cost.cash) throw new Error('Not enough cash');
+      for (const [m, n] of Object.entries(cost.mats)) if (countItem(p.stash, m) < n) throw new Error(`Need ${n}x ${ITEMS[m].name}`);
+      for (const [m, n] of Object.entries(cost.mats)) removeItem(p.stash, m, n);
+      p.cash -= cost.cash;
+      gun.tier = (gun.tier ?? 1) + 1;
+      notes.push(`Upgraded to ${gunName(gun)}`);
+      break;
+    }
+    case 'repair_gun': {
+      const gun = findGun(p, msg.uid);
+      const cost = repairCost(gun);
+      if (!cost) throw new Error('Already in perfect condition');
+      if (p.cash < cost.cash) throw new Error('Not enough cash');
+      for (const [m, n] of Object.entries(cost.mats)) if (countItem(p.stash, m) < n) throw new Error(`Need ${n}x ${ITEMS[m].name}`);
+      for (const [m, n] of Object.entries(cost.mats)) removeItem(p.stash, m, n);
+      p.cash -= cost.cash;
+      gun.dur = 100; gun.jammed = false;
+      notes.push(`${gunName(gun)} repaired`);
+      break;
+    }
+    case 'set_ammo': {
+      const gun = findGun(p, msg.uid);
+      const type = String(msg.type);
+      if (!AMMO_TYPES[type]) throw new Error('Unknown ammo type');
+      const st = weaponStats(gun);
+      if ((gun.ammoType ?? 'fmj') !== type) {
+        if (gun.mag > 0) toStash(p, makeStack(st.ammoItem, gun.mag), notes);
+        gun.mag = 0;
+        gun.ammoType = type;
+      }
+      // load from backpack first, then stash
+      const item = weaponStats(gun).ammoItem;
+      const want = weaponStats(gun).mag - gun.mag;
+      let got = Math.min(want, countItem(p.loadout.pack, item));
+      if (got > 0) removeItem(p.loadout.pack, item, got);
+      const fromStash = Math.min(want - got, countItem(p.stash, item));
+      if (fromStash > 0) removeItem(p.stash, item, fromStash);
+      gun.mag += got + fromStash;
+      notes.push(`${gunName(gun)} loaded with ${AMMO_TYPES[type].name} (${gun.mag} rounds)`);
+      break;
+    }
     case 'insure': {
       // DMZ insured weapon slot: one weapon that comes back after a cooldown if lost
       const uid = String(msg.uid);
@@ -228,7 +302,8 @@ export function applyAction(p, msg) {
         p.cash -= cost;
       }
       p.insuranceClaims.splice(i, 1);
-      const s = { ...c.stack, mag: WEAPONS[c.stack.id]?.mag ?? 0 };
+      const s = { ...c.stack, jammed: false };
+      s.mag = weaponStats(s)?.mag ?? 0;
       toStash(p, s, notes);
       p.insured.uid = s.uid;
       notes.push(`${ITEMS[s.id].name} returned by the insurer`);
@@ -259,6 +334,30 @@ export function applyAction(p, msg) {
       throw new Error('Unknown action');
   }
   return notes;
+}
+
+function findGun(p, uid) {
+  uid = String(uid);
+  for (const k of ['primary', 'secondary']) if (p.loadout[k]?.uid === uid) return p.loadout[k];
+  const g = p.stash.find(s => s.uid === uid) ?? p.loadout.pack.find(s => s.uid === uid);
+  if (!g || ITEMS[g.id]?.type !== 'weapon') throw new Error('Weapon not found');
+  return g;
+}
+
+// keep loaded rounds within capacity after changing magazines; spill extra rounds to the stash
+function clampMag(p, gun, notes) {
+  const st = weaponStats(gun);
+  if (gun.mag > st.mag) {
+    toStash(p, makeStack(st.ammoItem, gun.mag - st.mag), notes);
+    gun.mag = st.mag;
+  }
+}
+
+// selling/recycling a gun returns its attachments instead of destroying them
+function stripAttachments(p, s, notes) {
+  if (!s.att) return;
+  for (const id of Object.values(s.att)) if (id) toStash(p, makeStack(id), notes);
+  s.att = {};
 }
 
 function stripLoadout(p, notes) {

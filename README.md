@@ -59,6 +59,8 @@ npm test             # in-process raid logic + real WebSocket bots
 | Raid timer | ARC 30 min / DMZ radiation | 20 min, then The Sweep kills everyone left. |
 | Downed & revive | both | Squadmates revive with E. A tourniquet allows one self-revive. |
 | Wanted / bounty | MW4 DMZ (4 kills → Wanted) | 3 raider kills reveal you on everyone's map. Killing a Wanted raider pays $2,500. |
+| Guns & gunsmith | DMZ gunsmith, ARC weapon tiers/durability | 11 grounded, fictional firearms built in code (pistol, revolver, SMG, pump shotgun, carbine, burst rifle, K-47, DMR, bolt sniper, LMG). **5-slot gunsmith** (muzzle, barrel, optic, magazine, grip/stock) with 16 attachments. Suppressors shrink your noise radius for AI, so they feed straight into stealth. **Tiers I–IV**, **wear and jams** with repairs, and **FMJ/AP/HP** ammo (AP gets through shields and the Sentry's armor; HP hits flesh harder). Learnable per-gun recoil patterns, aim-time and sprint-to-fire handling, and 1.3x–6x optics with a scope overlay. |
+| Gun feel | — | CC0 recordings (near and far variants per gun, muffled with distance, filtered when suppressed). Muzzle flash, ejected brass, sparks, dust and bullet holes that depend on the surface, plus reload, pump and bolt animations. |
 | Crafting & recycling | ARC workshop / DMZ 3D printer | Workbench levels 1–3 and 22 recipes. Recycle junk into materials. |
 | Traders & contracts | ARC traders/quests, DMZ orders | Penny the Quartermaster sells basics. Contracts cover kill, deliver, survey, extract and boss jobs. |
 | Skill trees | ARC (Survival/Mobility/Conditioning) | Same three trees, 9 nodes, 1 point per level. |
@@ -73,7 +75,7 @@ npm test             # in-process raid logic + real WebSocket bots
 
 **Hub:** `WASD` walk · `E` use station / lift · `1`–`5` emotes · `Enter` chat (`/p` squad chat) · `Tab` terminal (menus) · `O` friends.
 
-**Raid:** `WASD` move · `Shift` sprint · `C` crouch · mouse aim · `LMB` fire · `RMB` aim down sights · `R` reload · `1`/`2` weapons · `E` interact/search/revive/extract · `Q` heal · `Z` shield cell · `G` frag · `T` lure beacon · `X` tourniquet (while downed) · `Tab` inventory · `M` map · `F` ping · `V` swap shoulder · `Enter` chat (start with `/` for proximity).
+**Raid:** `WASD` move · `Shift` sprint · `C` crouch · mouse aim · `LMB` fire · `RMB` aim down sights · `R` reload · `1`/`2` weapons · `B` cycle ammo type · `E` interact/search/revive/extract · `Q` heal · `Z` shield cell · `G` frag · `T` lure beacon · `X` tourniquet (while downed) · `Tab` inventory · `M` map · `F` ping · `V` swap shoulder · `Enter` chat (start with `/` for proximity).
 
 ## Architecture
 
@@ -87,10 +89,14 @@ client/                 static ES modules, no build step
   social.js             squad + friends panels, Deploy/Ready/Join Squad button logic
   models.js             shared low-poly character + label builders
   game.js               Three.js renderer, 3rd-person camera, prediction/interp, HUD, inventory, map
-  audio.js              procedural WebAudio SFX (no assets)
+  audio.js              WebAudio: CC0 gunshot samples (near/far/suppressed) + synthesized SFX
+  audio/                19 small MP3s (312 KB) — see CREDITS.md
+  guns.js               procedural gun models, attachments, mount points, inventory icons
+  fx.js                 pooled particles, bullet-hole decals, shell casings, flash lights
 shared/                 imported by BOTH server and browser
   data.js               items, weapons, enemies, loot tables, recipes, skills, POIs
   world.js              seeded map generation, spatial grid, collision, raycasts
+  gunsmith.js           weaponStats() (base + attachments + tier + ammo + wear), compat, costs, recoil patterns
   hubmap.js             hub layout (kiosks, lift) shared by server collision + client render
 server/
   index.js              HTTP static + /ws, auth, message routing, deploy plumbing
@@ -121,5 +127,5 @@ test/smoke.js           logic tests + networked bot test
 
 - Shot direction is client-reported, so aimbots are possible. Server-side checks for spread and angular speed would be the next anti-cheat layer.
 - AI uses steering and raycast avoidance, not a navmesh. It can get stuck on complex interiors.
-- Art is low-poly primitives with procedural audio. Swap in glTF models and samples later.
+- Art is low-poly primitives built in code. Guns have mount points (muzzle, optic, magazine, foregrip), so glTF models could replace them later. Gunshots use CC0 recordings (see `CREDITS.md`). Machines and UI sounds are synthesized.
 - No voice chat (WebRTC voice would need a TURN server that isn't on Railway).

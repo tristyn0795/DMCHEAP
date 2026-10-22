@@ -1,13 +1,14 @@
 // Authoritative raid simulation: movement validation, hitscan combat with lag compensation,
 // CHEAP machine + Rustline merc AI, stealth/noise, loot, keys, extraction, downed/revive, bounties.
 import {
-  C, ITEMS, WEAPONS, ENEMIES, POIS, LOOT_TABLES, CONTAINER_ROLLS, RARITY, HEADSHOT_MULT,
+  C, ITEMS, WEAPONS, ENEMIES, POIS, LOOT_TABLES, CONTAINER_ROLLS, RARITY, AMMO_TYPES, ATTACHMENTS,
   makeStack, addToStacks, countItem, removeItem, skillRank, sellPrice,
 } from '../shared/data.js';
 import {
   mulberry32, randRange, randInt, pick, resolveCircle, raycast, lineOfSight, rayCylinder, raySphere,
   poiAt, EXTRACT_SITES, HATCH_SITES, SPAWN_SITES,
 } from '../shared/world.js';
+import { weaponStats, gearKey, canAttach } from '../shared/gunsmith.js';
 
 export const ENEMY_KEYS = Object.keys(ENEMIES);
 export const WEAPON_KEYS = Object.keys(WEAPONS);
@@ -142,7 +143,7 @@ export class Raid {
       hp: d.hp, state: 'patrol', target: null, home: { x, z }, poi: poiId,
       aware: new Map(), lastShot: 0, inv: null, lostT: 0, wander: null, alarmT: 0, alarmCd: 0,
       hist: [], seenT: 0, barrageT: 6, strafe: this.rng() < 0.5 ? 1 : -1, percOff: this.nextEid % 4,
-      weapon: type === 'merc' ? (this.rng() < 0.6 ? 'ranger' : 'buzz') : null,
+      weapon: type === 'merc' ? pick(this.rng, ['ranger', 'ranger', 'buzz', 'k47', 'br7', 'doorknock']) : null,
     };
     this.enemies.set(e.id, e);
     return e;
@@ -289,6 +290,7 @@ export class Raid {
       case 'in': return this.onInput(p, m);
       case 'fire': return this.onFire(p, m);
       case 'reload': return this.onReload(p);
+      case 'ammo': return this.onAmmo(p, String(m.type));
       case 'swap': {
         if (p.state !== 'alive' || p.action) return;
         const slot = m.slot === 'secondary' ? 'secondary' : 'primary';
@@ -354,6 +356,7 @@ export class Raid {
     p.moveBudget = Math.max(0, p.moveBudget - Math.hypot(rx - p.x, rz - p.z));
     p.moving = Math.hypot(rx - p.x, rz - p.z) > 0.02;
     p.sprint = wantSprint && p.moving;
+    if (p.sprint) p.lastSprint = this.time;
     p.x = rx; p.z = rz;
     if (corrected) this.send(p, { t: 'pos', x: r2(p.x), z: r2(p.z) });
     // revive/hatch/search are cancelled by walking away
@@ -368,14 +371,22 @@ export class Raid {
     if (p.state !== 'alive' || p.action?.blocksFire) return;
     const s = this.weapon(p);
     if (!s) return;
-    const W = WEAPONS[s.id];
+    const W = weaponStats(s);
     if (this.time < p.reloadUntil) return;
     const interval = 60 / W.rpm;
     if (this.time - p.lastShot < interval * 0.75) return;
-    if (s.mag <= 0) return;
-    if (p.sprint) return;
+    if (s.mag <= 0 || s.jammed) return;
+    if ((s.dur ?? 100) <= 0) return this.msg(p, `${W.name} is broken — repair it at the Gunsmith`, 'warn');
+    if (p.sprint || this.time - (p.lastSprint ?? -10) < W.sprintFire * 0.5) return;
     s.mag--;
     p.lastShot = this.time;
+    // wear + jams (Arc Raiders-style durability)
+    s.dur = Math.max(0, (s.dur ?? 100) - W.wear);
+    if (W.jamChance > 0 && this.rng() < W.jamChance) {
+      s.jammed = true;
+      p.invDirty = true;
+      this.send(p, { t: 'jam' });
+    }
     const dirs = Array.isArray(m.d) ? m.d.slice(0, W.pellets) : [];
     const ox = p.x, oy = this.eyeY(p), oz = p.z;
     const rt = Math.max(this.time - 0.35, Math.min(this.time, +m.rt || this.time));
@@ -390,7 +401,8 @@ export class Raid {
       tracers.push([r1(end[0]), r1(end[1]), r1(end[2])]);
     }
     this.emitNoise(p.x, p.z, W.noise, p);
-    this.broadcastNear(p.x, p.z, C.AOI_RANGE, { t: 'fx', k: 'shot', nid: p.nid, w: s.id, o: [r1(ox), r1(oy), r1(oz)], e: tracers });
+    // suppressed shots are only audible/visible nearby
+    this.broadcastNear(p.x, p.z, W.suppressed ? 60 : C.AOI_RANGE, { t: 'fx', k: 'shot', nid: p.nid, w: s.id, sup: W.suppressed ? 1 : undefined, o: [r1(ox), r1(oy), r1(oz)], e: tracers });
   }
 
   // Lag-compensated hitscan: rewind other players/enemies to the client's render time.
@@ -434,13 +446,15 @@ export class Raid {
       const fall = best <= W.range ? 1 : Math.max(0.5, 1 - (best - W.range) / W.range * 0.5);
       let dmg = W.dmg * fall;
       if (hit.kind === 'player') {
-        if (hit.head) dmg *= HEADSHOT_MULT;
-        const res = this.damagePlayer(hit.o, dmg, { kind: 'player', p: shooter, x: ox, z: oz });
+        if (hit.head) dmg *= W.head;
+        dmg *= W.dmgAmmo;
+        const res = this.damagePlayer(hit.o, dmg, { kind: 'player', p: shooter, x: ox, z: oz }, { absorb: W.absorb });
         this.send(shooter, { t: 'hit', k: res.killed ? 'kill' : hit.head ? 'head' : res.shield ? 'shield' : 'body', d: Math.round(dmg) });
       } else {
         const e = hit.e;
-        if (hit.head) dmg *= e.d.human ? HEADSHOT_MULT : 2;
-        if (e.d.frontArmor) {
+        if (hit.head) dmg *= e.d.human ? W.head : 2;
+        dmg *= e.d.human ? W.dmgAmmo : W.machine;
+        if (e.d.frontArmor && !W.pen) {
           const ang = Math.atan2(ox - e.x, oz - e.z);
           const facing = Math.cos(ang - (e.yaw + Math.PI));
           if (facing > 0.3) dmg *= e.d.frontArmor;
@@ -477,8 +491,17 @@ export class Raid {
     if (p.state !== 'alive' || p.action) return;
     const s = this.weapon(p);
     if (!s || this.time < p.reloadUntil) return;
-    const W = WEAPONS[s.id];
-    if (s.mag >= W.mag || countItem(p.inv.pack, W.ammo) <= 0) return;
+    const W = weaponStats(s);
+    if (s.jammed) {
+      // clear the jam (racks the action), then top up if possible
+      s.jammed = false;
+      p.invDirty = true;
+      p.reloadUntil = this.time + 0.9;
+      p.reloading = { slot: p.active, until: p.reloadUntil };
+      this.send(p, { t: 'action', a: 'unjam', dur: 0.9 });
+      return;
+    }
+    if (s.mag >= W.mag || countItem(p.inv.pack, W.ammoItem) <= 0) return;
     const t = W.reload * (1 - 0.08 * skillRank(p, 'quick_hands'));
     p.reloadUntil = this.time + t;
     p.reloading = { slot: p.active, until: p.reloadUntil };
@@ -489,12 +512,30 @@ export class Raid {
     const r = p.reloading; p.reloading = null;
     const s = p.inv[r.slot];
     if (!s) return;
-    const W = WEAPONS[s.id];
+    const W = weaponStats(s);
     const need = W.mag - s.mag;
-    const have = countItem(p.inv.pack, W.ammo);
+    const have = countItem(p.inv.pack, W.ammoItem);
     const take = Math.min(need, have);
-    if (take > 0) { removeItem(p.inv.pack, W.ammo, take); s.mag += take; }
+    if (take > 0) { removeItem(p.inv.pack, W.ammoItem, take); s.mag += take; }
     p.invDirty = true;
+  }
+
+  // Switch loaded ammo type (FMJ / AP / HP): unload the mag back into the pack, then reload.
+  onAmmo(p, type) {
+    if (p.state !== 'alive' || p.action || !AMMO_TYPES[type]) return;
+    const s = this.weapon(p);
+    if (!s || this.time < p.reloadUntil || (s.ammoType ?? 'fmj') === type) return;
+    const W = weaponStats(s);
+    const next = W.ammo + AMMO_TYPES[type].suffix;
+    if (countItem(p.inv.pack, next) <= 0) return this.msg(p, `No ${ITEMS[next].name} in your backpack`);
+    if (s.mag > 0) {
+      const left = addToStacks(p.inv.pack, makeStack(W.ammoItem, s.mag), this.packCap(p));
+      if (left > 0) this.dropStack(p, makeStack(W.ammoItem, left));
+    }
+    s.mag = 0;
+    s.ammoType = type;
+    p.invDirty = true;
+    this.onReload(p);
   }
 
   onUse(p, id) {
@@ -714,7 +755,7 @@ export class Raid {
   }
 
   // ------------------------------------------------------------------ damage
-  damagePlayer(o, amount, src) {
+  damagePlayer(o, amount, src, opts = {}) {
     if (!this.inRaid(o)) return {};
     let shieldHit = false;
     if (o.state === 'downed') {
@@ -725,7 +766,7 @@ export class Raid {
     const sh = o.inv.shield;
     let hpDmg = amount;
     if (sh && sh.charge > 0) {
-      const absorb = Math.min(sh.charge, amount * ITEMS[sh.id].absorb);
+      const absorb = Math.min(sh.charge, amount * Math.min(0.9, ITEMS[sh.id].absorb * (opts.absorb ?? 1)));
       sh.charge = Math.max(0, sh.charge - absorb);
       hpDmg = amount - absorb;
       shieldHit = true;
@@ -851,7 +892,17 @@ export class Raid {
     let items = [];
     if (e.type === 'merc') {
       items = this.rollLoot('merc', 2);
-      if (e.weapon && this.rng() < 0.35) { const s = makeStack(e.weapon); s.mag = randInt(this.rng, 0, Math.floor(s.mag / 2)); items.push(s); }
+      if (e.weapon && this.rng() < 0.35) {
+        // DMZ-style: guns pulled off AI are often worn, sometimes with an attachment
+        const s = makeStack(e.weapon);
+        s.mag = randInt(this.rng, 0, Math.floor(s.mag / 2));
+        s.dur = randInt(this.rng, 25, 80);
+        if (this.rng() < 0.3) {
+          const opts = Object.keys(ATTACHMENTS).filter(a => canAttach(e.weapon, a) && RARITY[ATTACHMENTS[a].rarity].order <= 1);
+          if (opts.length) { const a = pick(this.rng, opts); s.att[ATTACHMENTS[a].slot] = a; }
+        }
+        items.push(s);
+      }
     } else {
       for (const [id, [a, b]] of Object.entries(e.d.drops)) {
         const n = randInt(this.rng, a, b);
@@ -1296,8 +1347,7 @@ export class Raid {
         if (!sq && Math.hypot(o.x - v.x, o.z - v.z) > C.AOI_RANGE) continue;
         const flags = (o.crouch ? 1 : 0) | (o.sprint ? 2 : 0) | (o.ads ? 4 : 0) | (o.state === 'downed' ? 8 : 0) |
           (o.wanted ? 16 : 0) | (o.reloading ? 32 : 0) | (o.action ? 64 : 0) | (sq ? 128 : 0) | (o.moving ? 256 : 0);
-        const wi = o.inv[o.active] ? WEAPON_KEYS.indexOf(o.inv[o.active].id) : -1;
-        ps.push([o.nid, r2(o.x), r2(o.z), r2(o.yaw), r2(o.pitch), flags, wi, Math.round(o.hp / o.maxHp * 100)]);
+        ps.push([o.nid, r2(o.x), r2(o.z), r2(o.yaw), r2(o.pitch), flags, gearKey(o.inv[o.active]), Math.round(o.hp / o.maxHp * 100)]);
       }
       const es = [];
       for (const e of this.enemies.values()) {
@@ -1313,7 +1363,8 @@ export class Raid {
       const me = {
         hp: Math.round(p.hp), mhp: p.maxHp, sh: Math.round(p.inv.shield?.charge ?? 0), shc: this.shieldCap(p),
         st: Math.round(p.stamina), aw: r2(p.awareness), mag: wpn?.mag ?? 0,
-        res: wpn ? countItem(p.inv.pack, WEAPONS[wpn.id].ammo) : 0, s: p.state,
+        res: wpn ? countItem(p.inv.pack, weaponStats(wpn).ammoItem) : 0, s: p.state,
+        at: wpn?.ammoType ?? 'fmj', du: wpn ? Math.round(wpn.dur ?? 100) : undefined, jam: wpn?.jammed ? 1 : undefined,
         dh: p.state === 'downed' ? Math.round(p.bleed) : undefined, wanted: p.wanted || undefined,
       };
       this.send(p, { t: 's', tm: r2(this.time), p: ps, e: es, me, w: wanted.length ? wanted : undefined });

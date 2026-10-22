@@ -1,9 +1,12 @@
 // Raid client: Three.js rendering, third-person controls, prediction + interpolation, HUD.
 import * as THREE from 'three';
-import { C, ITEMS, WEAPONS, ENEMIES, POIS, ADS_SPREAD_MULT, MOVE_SPREAD_MULT, countItem } from '/shared/data.js';
+import { C, ITEMS, WEAPONS, ENEMIES, POIS, AMMO_TYPES, AMMO_ORDER, countItem } from '/shared/data.js';
+import { weaponStats, recoilPattern, decodeGear, gearKey, JAM_BELOW } from '/shared/gunsmith.js';
+import { buildGun } from './guns.js';
+import { Particles, Decals, Shells, LightPool, flashTexture, surfaceOf, boxNormal } from './fx.js';
 import { generateWorld, KIND, raycast, stepMove, poiAt, raySphere } from '/shared/world.js';
 import { $, esc, itemHTML, showMenu, hideMenu } from './ui.js';
-import { makeHuman as buildHuman, makeLabel as buildLabel, animHuman } from './models.js';
+import { makeHuman as buildHuman, makeLabel as buildLabel, animHuman, setGunModel } from './models.js';
 
 const ENEMY_KEYS = Object.keys(ENEMIES);
 const WEAPON_KEYS = Object.keys(WEAPONS);
@@ -133,6 +136,12 @@ export class Game {
     this.fxGroup = new THREE.Group();
     s.add(this.fxGroup);
     this.fx = [];
+    this.sparks = new Particles(s, 700, true);
+    this.dust = new Particles(s, 700, false);
+    this.decals = new Decals(s);
+    this.shells = new Shells(s);
+    this.lights = new LightPool(s, 4);
+    this.flashMat = new THREE.SpriteMaterial({ map: flashTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
   }
 
   addContainerMesh(id, type, x, z) {
@@ -181,6 +190,7 @@ export class Game {
     } else if (type === 'merc') {
       const h = this.makeHuman(0x55503f, 0xff3030);
       h.group.userData.human = h;
+      setGunModel(h, buildGun({ id: 'ranger', att: {} }));
       return { group: h.group, eyeMat: h.visor.material, human: h };
     } else if (type === 'warden') {
       add(new THREE.BoxGeometry(3.4, 2.2, 4.0), new THREE.MeshLambertMaterial({ color: 0x5a4f45 }), 0, 3.2, 0);
@@ -235,6 +245,7 @@ export class Game {
     for (const c of m.dyn) this.addDyn(c);
     this.buildExtractMeshes();
     this.player = this.makeHuman(0xd9822b, 0x7ff0ff);
+    this.myGunKey = null; this.myGun = null; this.burstLeft = 0; this.recoilAcc = 0; this.sprayN = 0; this.reloadAnim = null; this.cycleAnim = null;
     this.dynamic.add(this.player.group);
     $('#raid').classList.remove('hidden');
     $('#end').classList.add('hidden');
@@ -249,6 +260,7 @@ export class Game {
   }
 
   clearRaid() {
+    this.decals?.clear();
     for (const c of this.dynamic.children.slice()) this.dynamic.remove(c);
     for (const c of this.fxGroup.children.slice()) this.fxGroup.remove(c);
     this.fx = [];
@@ -320,7 +332,8 @@ export class Game {
     if (!this.active && m.t !== 'raid_start') return;
     switch (m.t) {
       case 's': return this.onSnap(m);
-      case 'inv': this.inv = m; if (!$('#inv').classList.contains('hidden')) this.renderInv(); return;
+      case 'inv': this.inv = m; this.syncMyGun(); if (!$('#inv').classList.contains('hidden')) this.renderInv(); return;
+      case 'jam': this.sfx.click(); this.feed('JAMMED — press R to clear', 'warn'); return;
       case 'pos': this.me.x = m.x; this.me.z = m.z; return;
       case 'fx': return this.onFx(m);
       case 'hit': return this.onHit(m);
@@ -363,7 +376,8 @@ export class Game {
       case 'action': {
         if (!m.a) { this.action = null; return; }
         this.action = { a: m.a, id: m.id, dur: m.dur, start: performance.now() / 1000 };
-        if (m.a === 'reload') this.sfx.reload();
+        if (m.a === 'reload') { this.sfx.reload(this.currentWeapon()?.w.cls); this.reloadAnim = { start: this.now, dur: m.dur }; }
+        if (m.a === 'unjam') { this.sfx.rack(); this.reloadAnim = { start: this.now, dur: m.dur, rack: true }; }
         return;
       }
       case 'downed': this.me.state = 'downed'; this.feed(m.canSelf ? 'DOWNED — press X to use your tourniquet' : 'DOWNED — hold on for a squadmate', 'warn'); return;
@@ -413,7 +427,14 @@ export class Game {
       }
       r.buf.push([m.tm, x, z, yaw, pitch]);
       if (r.buf.length > 30) r.buf.shift();
-      r.flags = flags; r.wi = wi; r.hp = hp;
+      r.flags = flags; r.hp = hp;
+      if (r.gk !== wi) {
+        r.gk = wi;
+        const gear = decodeGear(wi);
+        r.gun = gear ? buildGun(gear) : null;
+        r.suppressed = !!(gear && weaponStats(gear).suppressed);
+        setGunModel(r.h, r.gun);
+      }
       if ((flags & 16) && !r.wantedLabel) { r.wantedLabel = this.makeLabel('WANTED', '#ff4d4d'); r.wantedLabel.position.y = 2.6; r.h.group.add(r.wantedLabel); }
     }
     for (const [nid, r] of this.remotes) if (!seenP.has(nid)) { this.dynamic.remove(r.h.group); this.remotes.delete(nid); }
@@ -436,7 +457,7 @@ export class Game {
     for (const [id, e] of this.enemies) if (!seenE.has(id)) { this.dynamic.remove(e.mk.group); this.enemies.delete(id); }
     const me = m.me;
     if (me.s === 'spec') { this.specNid = me.tgt; this.wantedList = m.w ?? []; return; }
-    Object.assign(this.me, { hp: me.hp, mhp: me.mhp, sh: me.sh, shc: me.shc, st: me.st, aw: me.aw, res: me.res, state: me.s, dh: me.dh, wanted: me.wanted });
+    Object.assign(this.me, { hp: me.hp, mhp: me.mhp, sh: me.sh, shc: me.shc, st: me.st, aw: me.aw, res: me.res, state: me.s, dh: me.dh, wanted: me.wanted, jam: !!me.jam, at: me.at, du: me.du });
     if (this.localMag == null || this.now - this.lastShot > 0.4) this.localMag = me.mag;
     this.wantedList = m.w ?? [];
   }
@@ -460,14 +481,19 @@ export class Game {
     if (m.k === 'shot') {
       if (m.nid === this.nid) return;
       const d = Math.hypot(m.o[0] - meX, m.o[2] - meZ);
-      this.sfx.shot(m.w, Math.max(0, 1 - d / 160));
-      for (const e of m.e) this.tracer(m.o, e, 0xffd27a);
-      this.flash(m.o);
+      const r = [...this.remotes.values()].find(x => x.nid === m.nid);
+      const mz = r?.gun ? r.gun.muzzle.getWorldPosition(new THREE.Vector3()).toArray() : m.o;
+      this.sfx.shot(m.w, Math.max(0, 1 - d / (m.sup ? 60 : 160)), { suppressed: !!m.sup, dist: d });
+      for (const e of m.e) { this.tracer(mz, e, 0xffd27a, m.sup ? 0.35 : 0.9); this.impactAlong(m.o, e); }
+      if (!m.sup) this.muzzleFlash(mz, WEAPONS[m.w]?.cls);
+      if (r?.gun) r.kick = 1;
     } else if (m.k === 'eshot') {
       const d = Math.hypot(m.o[0] - meX, m.o[2] - meZ);
       const en = this.enemies.get(m.id);
       this.sfx.shot(en?.type === 'merc' ? 'merc' : 'machine', Math.max(0, 1 - d / 120) * 0.8);
       this.tracer(m.o, m.e, en?.type === 'merc' ? 0xffd27a : 0xff5a3a);
+      this.impactAlong(m.o, m.e);
+      if (en?.type === 'merc' || d < 60) this.muzzleFlash(m.o, en?.type === 'merc' ? 'Rifle' : 'machine');
     } else if (m.k === 'boom') {
       const d = Math.hypot(m.x - meX, m.z - meZ);
       this.sfx.boom(Math.max(0.05, 1 - d / 150));
@@ -549,11 +575,42 @@ export class Game {
   }
 
   // ================================================================ effects
-  tracer(a, b, color) {
+  tracer(a, b, color, opacity = 0.9) {
     const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }));
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
     this.fxGroup.add(line);
-    this.fx.push({ obj: line, life: 0.08, max: 0.08, kind: 'fade' });
+    this.fx.push({ obj: line, life: 0.08, max: 0.08, kind: 'fade', o0: opacity });
+  }
+  muzzleFlash(p, cls) {
+    const sp = new THREE.Sprite(this.flashMat);
+    const sz = cls === 'Pistol' || cls === 'SMG' ? 0.35 : cls === 'machine' ? 0.3 : cls === 'Shotgun' || cls === 'Sniper' || cls === 'LMG' ? 0.75 : 0.55;
+    sp.scale.set(sz, sz, sz);
+    sp.material.rotation = Math.random() * Math.PI;
+    sp.position.set(...p);
+    this.fxGroup.add(sp);
+    this.fx.push({ obj: sp, life: 0.045, max: 0.045, kind: 'sprite' });
+    this.lights.flash(p[0], p[1], p[2], 0xffc070, 6, 0.06, 7);
+  }
+  // Raycast the last stretch of a shot locally to find the surface, then spawn the right impact
+  impactAlong(o, e) {
+    const dx = e[0] - o[0], dy = e[1] - o[1], dz = e[2] - o[2];
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 0.5 || Math.hypot(e[0] - this.me.x, e[2] - this.me.z) > 120) return;
+    const hit = raycast(this.world, o[0], o[1], o[2], dx / len, dy / len, dz / len, len + 0.3);
+    if (hit.box === -1 || Math.abs(hit.t - len) > 0.6) return; // ended in a body or mid-air
+    const p = new THREE.Vector3(o[0] + dx / len * hit.t, o[1] + dy / len * hit.t, o[2] + dz / len * hit.t);
+    this.impact(p, boxNormal(this.world, hit.box, p), surfaceOf(this.world, hit.box));
+  }
+  impact(p, n, surface) {
+    const rnd = (k) => (Math.random() - 0.5) * k;
+    if (surface === 'metal') {
+      for (let i = 0; i < 9; i++) this.sparks.emit(p.x, p.y, p.z, n.x * 3 + rnd(5), n.y * 3 + rnd(5) + 1, n.z * 3 + rnd(5), { color: 0xffc860, size: 0.05, life: 0.25 + Math.random() * 0.2, grav: 12 });
+    } else {
+      const col = { dirt: 0x6e5a40, wood: 0x7a5530, leaf: 0x4d6a34, rock: 0x8a847a, concrete: 0x9a9286 }[surface] ?? 0x8a847a;
+      for (let i = 0; i < 6; i++) this.dust.emit(p.x, p.y, p.z, n.x * 1.5 + rnd(1.5), n.y * 1.5 + rnd(1.5) + 0.6, n.z * 1.5 + rnd(1.5), { color: col, size: 0.12, life: 0.5 + Math.random() * 0.4, grav: 3, grow: 0.25 });
+      if (surface === 'concrete' || surface === 'rock') for (let i = 0; i < 3; i++) this.sparks.emit(p.x, p.y, p.z, n.x * 2 + rnd(3), n.y * 2 + rnd(3), n.z * 2 + rnd(3), { color: 0xffe0a0, size: 0.03, life: 0.12, grav: 10 });
+    }
+    if (surface !== 'leaf') this.decals.add(p, n);
   }
   flash(p) {
     const s = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true }));
@@ -566,10 +623,9 @@ export class Game {
     s.position.set(x, y, z);
     this.fxGroup.add(s);
     this.fx.push({ obj: s, life: 0.5, max: 0.5, kind: 'boom', r });
-    const l = new THREE.PointLight(0xff9a40, 30, r * 6);
-    l.position.set(x, y + 1, z);
-    this.fxGroup.add(l);
-    this.fx.push({ obj: l, life: 0.25, max: 0.25, kind: 'light' });
+    this.lights.flash(x, y + 1, z, 0xff9a40, 30, 0.3, r * 6);
+    for (let i = 0; i < 18; i++) this.dust.emit(x, y, z, (Math.random() - 0.5) * 8, Math.random() * 6, (Math.random() - 0.5) * 8, { color: 0x4a443c, size: 0.5, life: 1.2, grav: 2, grow: 1.2 });
+    for (let i = 0; i < 20; i++) this.sparks.emit(x, y, z, (Math.random() - 0.5) * 14, Math.random() * 10, (Math.random() - 0.5) * 14, { color: 0xffb040, size: 0.08, life: 0.5, grav: 12 });
   }
   addPing(m) {
     const g = new THREE.Mesh(new THREE.ConeGeometry(0.4, 1.2, 4), new THREE.MeshBasicMaterial({ color: 0x9fe0ff, depthTest: false, transparent: true }));
@@ -587,14 +643,15 @@ export class Game {
       const f = this.fx[i];
       f.life -= dt;
       const k = Math.max(0, f.life / f.max);
-      if (f.kind === 'fade') f.obj.material.opacity = k;
+      if (f.kind === 'fade') f.obj.material.opacity = k * (f.o0 ?? 1);
+      else if (f.kind === 'sprite') { /* shared material: just expire */ }
       else if (f.kind === 'boom') { f.obj.scale.setScalar(f.r * (1 - k * 0.7)); f.obj.material.opacity = k; }
       else if (f.kind === 'light') f.obj.intensity = 30 * k;
       else if (f.kind === 'mark') { f.obj.material.opacity = 0.2 + (1 - k) * 0.5; }
       else if (f.kind === 'ping') { f.obj.position.y += Math.sin(this.now * 4) * 0.005; f.obj.rotation.y += dt * 2; }
       if (f.life <= 0) {
         this.fxGroup.remove(f.obj);
-        f.obj.geometry?.dispose(); f.obj.material?.dispose();
+        if (f.kind !== 'sprite') { f.obj.geometry?.dispose(); f.obj.material?.dispose(); }
         this.fx.splice(i, 1);
       }
     }
@@ -610,7 +667,7 @@ export class Game {
     });
     document.addEventListener('mousemove', (e) => {
       if (!this.locked || !this.active) return;
-      const s = this.sens * (this.adsT > 0.5 ? 0.6 : 1);
+      const s = this.sens * (this.adsT > 0.5 ? 0.6 : 1) * (this.zoomSens ?? 1);
       this.me.yaw -= e.movementX * s;
       this.me.pitch = Math.max(-1.35, Math.min(1.2, this.me.pitch - e.movementY * s));
     });
@@ -679,6 +736,7 @@ export class Game {
     const send = (m) => this.net.send(m);
     switch (k) {
       case 'KeyR': send({ t: 'reload' }); break;
+      case 'KeyB': this.cycleAmmo(); break;
       case 'Digit1': send({ t: 'swap', slot: 'primary' }); this.localMag = null; break;
       case 'Digit2': send({ t: 'swap', slot: 'secondary' }); this.localMag = null; break;
       case 'KeyC': case 'ControlLeft': this.me.crouch = !this.me.crouch; break;
@@ -910,9 +968,10 @@ export class Game {
     }
 
     // ---- camera
-    this.adsT += ((this.ads ? 1 : 0) - this.adsT) * Math.min(1, dt * 12);
+    const adsTime = Math.max(0.08, W?.w.ads ?? 0.2);
+    this.adsT = Math.max(0, Math.min(1, this.adsT + (this.ads ? 1 : -1.5) * dt / adsTime));
     const a = this.adsT;
-    const side = (0.85 - 0.3 * a) * this.shoulder, up = 0.5 - 0.3 * a, back = 4.2 - 2.6 * a;
+    const side = (0.85 + 0.12 * a) * this.shoulder, up = 0.5 - 0.22 * a, back = 4.2 - 2.75 * a;
     const pivot = new THREE.Vector3(me.x, me.eye + 0.1, me.z);
     const fwd = this.forward();
     const right = new THREE.Vector3(Math.cos(me.yaw), 0, -Math.sin(me.yaw));
@@ -922,8 +981,14 @@ export class Game {
     const camDist = hit.box !== -1 && hit.t < len ? Math.max(0.2, hit.t - 0.25) : len;
     this.camera.position.copy(pivot).addScaledVector(dir, camDist);
     this.camera.rotation.set(me.pitch, me.yaw, 0, 'YXZ');
-    const fovTarget = this.ads ? (W?.id === 'longshot' ? 32 : 52) : 72;
-    if (Math.abs(this.camera.fov - fovTarget) > 0.1) { this.camera.fov += (fovTarget - this.camera.fov) * Math.min(1, dt * 12); this.camera.updateProjectionMatrix(); }
+    // optic magnification: fov shrinks with zoom; high-power optics get a scope overlay
+    const zoom = W?.w.zoom ?? 1.2;
+    const adsFov = 2 * Math.atan(Math.tan(36 * Math.PI / 180) / (zoom * 1.2)) * 180 / Math.PI;
+    const fovTarget = 72 + (adsFov - 72) * this.adsT;
+    if (Math.abs(this.camera.fov - fovTarget) > 0.05) { this.camera.fov = fovTarget; this.camera.updateProjectionMatrix(); }
+    this.scoped = zoom >= 3 && this.adsT > 0.85;
+    $('#scope').classList.toggle('hidden', !this.scoped);
+    this.zoomSens = this.adsT > 0.5 ? 1 / Math.max(1, zoom * 0.8) : 1;
     this.sun.position.set(me.x + 60, 90, me.z + 40);
     this.sun.target.position.set(me.x, 0, me.z);
 
@@ -932,12 +997,18 @@ export class Game {
     pg.position.set(me.x, 0, me.z);
     pg.rotation.set(0, me.yaw, 0);
     this.animHuman(this.player, moved, me.crouch, downed, speed, dt);
-    pg.visible = camDist > 0.8 && (alive || downed);
+    pg.visible = camDist > 0.8 && (alive || downed) && !this.scoped;
+    this.animGun(this.player, dt);
 
     // ---- shooting
     this.bloom = Math.max(0, this.bloom - dt * 3);
     if (!this.mouse.l) this.firedThisClick = false;
-    if (firing && W) this.tryFire(W.w, W.s);
+    if (this.sprint) this.lastSprintAt = this.now;
+    if (W && ((firing && alive) || this.burstLeft > 0)) this.tryFire(W.w, W.s);
+    if (W && this.recoilAcc > 0 && this.now - this.lastShot > 60 / W.w.rpm * 1.4) {
+      const r = Math.min(this.recoilAcc, W.w.recover * 0.35 * dt);
+      me.pitch -= r; this.recoilAcc -= r;
+    }
 
     // ---- remotes & enemies interpolation
     const rt = this.serverNow - INTERP;
@@ -949,6 +1020,7 @@ export class Game {
       g.position.set(s[1], 0, s[2]);
       g.rotation.set(0, s[3], 0);
       const mv = !!(rm.flags & 256);
+      this.animGun(rm.h, dt, rm);
       this.animHuman(rm.h, mv, !!(rm.flags & 1), !!(rm.flags & 8), Math.hypot(s[1] - px, s[2] - pz) / Math.max(dt, 1e-3), dt);
     }
     for (const e of this.enemies.values()) {
@@ -966,6 +1038,7 @@ export class Game {
 
     this.updateInteract();
     this.updateFx(dt);
+    this.sparks.update(dt); this.dust.update(dt); this.shells.update(dt); this.lights.update(dt);
     if (this.loot && !$('#inv').classList.contains('hidden')) {
       const c = this.findCont(this.loot.id);
       if (!c || Math.hypot(c.x - me.x, c.z - me.z) > C.INTERACT_RANGE + 1.2) { this.loot = null; this.net.send({ t: 'close_loot' }); this.renderInv(); }
@@ -990,44 +1063,127 @@ export class Game {
     const I = this.inv;
     if (!I) return null;
     const s = I.inv[I.active];
-    return s ? { s, w: WEAPONS[s.id] } : null;
+    return s ? { s, w: weaponStats(s) } : null;
+  }
+
+  // keep the held gun model in sync with the active weapon + attachments
+  syncMyGun() {
+    const W = this.currentWeapon();
+    const key = W ? gearKey(W.s) : '';
+    if (key === this.myGunKey) return;
+    this.myGunKey = key;
+    this.myGun = W ? buildGun(W.s) : null;
+    setGunModel(this.player, this.myGun);
+    this.burstLeft = 0;
+  }
+
+  cycleAmmo() {
+    const W = this.currentWeapon();
+    if (!W) return;
+    const pack = this.inv.inv.pack;
+    const cur = AMMO_ORDER.indexOf(W.s.ammoType ?? 'fmj');
+    for (let i = 1; i <= AMMO_ORDER.length; i++) {
+      const t = AMMO_ORDER[(cur + i) % AMMO_ORDER.length];
+      if (countItem(pack, W.w.ammo + AMMO_TYPES[t].suffix) > 0) {
+        if (t !== W.s.ammoType) { this.net.send({ t: 'ammo', type: t }); this.feed(`Loading ${AMMO_TYPES[t].name} rounds`); }
+        return;
+      }
+    }
+    this.feed('No other ammo types for this weapon in your backpack');
   }
 
   tryFire(W, s) {
-    if (this.sprint || this.action) return;
     const now = this.now;
-    if (!W.auto && this.firedThisClick) return;
+    if (this.sprint || this.action) { this.burstLeft = 0; return; }
+    if (this.me.jam) { if (!this.firedThisClick) { this.sfx.click(); this.firedThisClick = true; this.feed('JAMMED — press R', 'warn'); } return; }
+    if ((s.dur ?? 100) <= 0) return;
+    if (now - (this.lastSprintAt ?? -10) < W.sprintFire) return;
     if (now - this.lastShot < 60 / W.rpm) return;
+    if (W.mode === 'burst') {
+      if (this.burstLeft <= 0) {
+        if (this.firedThisClick || now < (this.burstLockUntil ?? 0)) return;
+        this.burstLeft = W.burst;
+      }
+    } else if (!W.auto && this.firedThisClick) return;
     if ((this.localMag ?? 0) <= 0) {
+      this.burstLeft = 0;
       if (!this.firedThisClick) { this.sfx.click(); this.firedThisClick = true; if (this.me.res > 0) this.net.send({ t: 'reload' }); }
       return;
     }
     this.firedThisClick = true;
+    if (W.mode === 'burst') { this.burstLeft--; if (this.burstLeft <= 0) this.burstLockUntil = now + W.burstDelay; }
+    if (now - this.lastShot > 0.35) this.sprayN = 0;
     this.lastShot = now;
     this.localMag--;
     const me = this.me;
     const origin = new THREE.Vector3(me.x, me.crouch ? C.EYE_CROUCH : C.EYE_STAND, me.z);
     const aim = this.aimPoint();
     const base = aim.clone().sub(origin).normalize();
-    let spread = W.spread * (this.ads ? ADS_SPREAD_MULT : 1) * (this.moving ? MOVE_SPREAD_MULT : 1) * (me.crouch ? 0.8 : 1) * (1 + this.bloom);
+    const spread = W.spread * (this.ads ? W.adsSpread : 1) * (this.moving ? W.moveSpread : 1) * (me.crouch ? 0.8 : 1) * (1 + this.bloom);
+    this.player.group.updateMatrixWorld(true);
+    const muzzle = this.myGun ? this.myGun.muzzle.getWorldPosition(new THREE.Vector3()) : origin.clone().addScaledVector(base, 0.8);
     const dirs = [];
     for (let i = 0; i < W.pellets; i++) {
       const d = base.clone();
       const u = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(Math.random() * spread);
       d.add(u).normalize();
       dirs.push([+d.x.toFixed(4), +d.y.toFixed(4), +d.z.toFixed(4)]);
-      const end = raycast(this.world, origin.x, origin.y, origin.z, d.x, d.y, d.z, W.range * 2).t;
-      const muzzle = origin.clone().add(new THREE.Vector3(Math.cos(me.yaw), 0, -Math.sin(me.yaw)).multiplyScalar(0.25)).addScaledVector(d, 0.6);
-      this.tracer(muzzle.toArray(), origin.clone().addScaledVector(d, end).toArray(), 0xffe9a8);
-      if (i === 0) this.flash(muzzle.toArray());
+      const hit = raycast(this.world, origin.x, origin.y, origin.z, d.x, d.y, d.z, W.range * 2);
+      const end = origin.clone().addScaledVector(d, hit.t);
+      this.tracer(muzzle.toArray(), end.toArray(), 0xffe9a8, W.suppressed ? 0.35 : 0.9);
+      if (hit.box !== -1) this.impact(end, boxNormal(this.world, hit.box, end), surfaceOf(this.world, hit.box));
     }
     this.net.send({ t: 'fire', d: dirs, rt: +(this.serverNow - INTERP).toFixed(3) });
-    this.sfx.shot(s.id, 0.9);
-    // recoil + bloom
-    const kick = (W.dmg * W.pellets) / 900 * (this.ads ? 0.6 : 1);
-    me.pitch = Math.min(1.2, me.pitch + kick);
-    me.yaw += (Math.random() - 0.5) * kick * 0.6;
-    this.bloom = Math.min(2.5, this.bloom + (W.auto ? 0.25 : 0.6));
+    this.sfx.shot(s.id, 0.9, { suppressed: W.suppressed, dist: 0 });
+    if (!W.suppressed) this.muzzleFlash(muzzle.toArray(), W.cls);
+    // brass: auto/semi eject now; pump & bolt eject when the action cycles
+    const right = new THREE.Vector3(Math.cos(me.yaw), 0, -Math.sin(me.yaw));
+    if (W.cls !== 'Revolver' && W.mode !== 'pump' && W.mode !== 'bolt') this.shells.eject(muzzle.clone().lerp(origin, 0.6), right, new THREE.Vector3(0, 1, 0), false);
+    if (W.mode === 'pump' || W.mode === 'bolt') {
+      this.cycleAnim = { start: now + 0.12, dur: 60 / W.rpm * 0.7, mode: W.mode };
+      setTimeout(() => { this.sfx.rack(W.mode); if (this.myGun) this.shells.eject(muzzle.clone().lerp(origin, 0.6), right, new THREE.Vector3(0, 1, 0), W.mode === 'pump'); }, 160);
+    }
+    // recoil: learnable per-gun pattern + a little noise, partially recovered after you stop firing
+    const n = this.sprayN++;
+    const adsK = this.ads ? 0.75 : 1;
+    const kickV = W.recoilV * adsK * (1 + Math.min(n, 8) * 0.04);
+    const kickH = W.recoilH * adsK * (recoilPattern(s.id, n) + (Math.random() - 0.5) * 0.4);
+    me.pitch = Math.min(1.2, me.pitch + kickV);
+    me.yaw -= kickH;
+    this.recoilAcc = (this.recoilAcc ?? 0) + kickV * 0.7;
+    this.bloom = Math.min(2.5, this.bloom + (W.auto || W.mode === 'burst' ? 0.18 : 0.5));
+    this.gunKick = 1;
+  }
+
+  // gun-local animation: recoil kick, mag drop during reload, pump/bolt cycling
+  animGun(h, dt, remote) {
+    const g = h.model;
+    if (!g) return;
+    const k = remote ? (remote.kick = Math.max(0, (remote.kick ?? 0) - dt * 10)) : (this.gunKick = Math.max(0, (this.gunKick ?? 0) - dt * 10));
+    g.group.position.z = k * 0.06;
+    g.group.rotation.x = k * 0.08;
+    if (remote) return;
+    if (g.mag && g.magHome) {
+      const ra = this.reloadAnim;
+      let off = 0, vis = true;
+      if (ra && !ra.rack) {
+        const t = (this.now - ra.start) / ra.dur;
+        if (t >= 1) this.reloadAnim = null;
+        else if (t < 0.3) off = t / 0.3 * 0.25;
+        else if (t < 0.55) { off = 0.25; vis = false; }
+        else off = Math.max(0, (1 - (t - 0.55) / 0.35)) * 0.25;
+      }
+      g.mag.position.y = g.magHome.y - off;
+      g.mag.visible = vis;
+    }
+    const ca = this.cycleAnim;
+    if (ca && this.now >= ca.start) {
+      const t = (this.now - ca.start) / ca.dur;
+      const back = t < 0.5 ? t * 2 : Math.max(0, 2 - t * 2);
+      if (g.pump && g.pumpHome) g.pump.position.z = g.pumpHome.z + back * 0.09;
+      if (g.bolt) g.bolt.rotation.y = back * 1.2;
+      if (t >= 1) this.cycleAnim = null;
+    }
   }
 
   findCont(id) {
@@ -1115,7 +1271,8 @@ export class Game {
     $('#t-sh').textContent = me.shc ? `${me.sh}/${me.shc}` : '—';
     $('#b-st').style.width = Math.min(100, me.st) + '%';
     const W = this.currentWeapon();
-    $('#wname').textContent = W ? `${W.w.name.toUpperCase()} · ${W.w.cls}` + (this.inv.active === 'secondary' ? ' [2]' : ' [1]') : 'UNARMED';
+    $('#wname').innerHTML = W ? `${esc(W.w.name.toUpperCase())} · ${W.w.cls}${W.w.mode === 'burst' ? ' · BURST' : ''}` + (this.inv.active === 'secondary' ? ' [2]' : ' [1]')
+      + `<div class="wsub"><span class="ammo-type">${AMMO_TYPES[me.at ?? 'fmj']?.name ?? 'FMJ'}</span> <kbd>B</kbd>${me.du != null && me.du < JAM_BELOW ? ` <span class="worn">WORN ${me.du}%</span>` : ''}${me.jam ? ' <span class="worn">JAMMED · R</span>' : ''}</div>` : 'UNARMED';
     $('#ammo').innerHTML = W ? `${this.localMag ?? 0}<small> / ${me.res}</small>` : '';
     const pack = this.inv?.inv.pack ?? [];
     const q = (key, id, label) => `<span><kbd>${key}</kbd>${label} ${countItem(pack, id)}</span>`;
@@ -1128,11 +1285,11 @@ export class Game {
     $('#stealth').style.opacity = aw > 0.02 ? 1 : 0.35;
     // crosshair spread
     const W2 = W?.w;
-    const gap = W2 ? 6 + W2.spread * 400 * (this.ads ? ADS_SPREAD_MULT : 1) * (this.moving ? MOVE_SPREAD_MULT : 1) * (1 + this.bloom) : 8;
+    const gap = W2 ? 6 + W2.spread * 400 * (this.ads ? W2.adsSpread : 1) * (this.moving ? W2.moveSpread : 1) * (1 + this.bloom) : 8;
     const ch = $('#crosshair');
     ch.querySelector('.t').style.top = `${-gap - 8}px`; ch.querySelector('.b').style.top = `${gap}px`;
     ch.querySelector('.l').style.left = `${-gap - 8}px`; ch.querySelector('.r').style.left = `${gap}px`;
-    ch.style.opacity = this.sprint ? 0.2 : 1;
+    ch.style.opacity = this.sprint || this.scoped ? 0 : 1;
     // prompt & progress
     const pr = $('#prompt');
     if (this.interactTarget && !this.action) { pr.style.display = 'block'; pr.innerHTML = `<kbd>E</kbd>${esc(this.interactTarget.label)}`; }

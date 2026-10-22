@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import WebSocket from 'ws';
-import { C, makeStack } from '../shared/data.js';
+import { C, makeStack, countItem } from '../shared/data.js';
 import { generateWorld } from '../shared/world.js';
 import { Raid } from '../server/raid.js';
 import { newProfile, prepareDeploy, applyRaidResult, applyAction } from '../server/profiles.js';
@@ -110,6 +110,90 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   ok(hp.loadout.rig?.id === 'rig_free', 'free kit works');
   applyAction(hp, { a: 'insure', uid: hp.loadout.primary.uid });
   ok(hp.insured.uid === hp.loadout.primary.uid, 'insure works');
+}
+
+// ---------------------------------------------------------------- gunsmith + gunplay (in-process)
+{
+  const { weaponStats, canAttach, decodeGear, gearKey, upgradeCost } = await import('../shared/gunsmith.js');
+  const p = newProfile('Smith');
+  p.cash = 1e6;
+  const gun = makeStack('ranger');
+  p.stash.push(gun);
+  for (const id of ['att_supp', 'att_3x', 'att_mag_ext', 'att_vgrip', 'att_6x']) p.stash.push(makeStack(id));
+  const base = weaponStats(gun);
+  const idxOf = (id) => p.stash.findIndex(s => s.id === id);
+  applyAction(p, { a: 'attach', uid: gun.uid, idx: idxOf('att_supp') });
+  applyAction(p, { a: 'attach', uid: gun.uid, idx: idxOf('att_mag_ext') });
+  applyAction(p, { a: 'attach', uid: gun.uid, idx: idxOf('att_3x') });
+  const st = weaponStats(gun);
+  ok(st.suppressed && st.noise < base.noise * 0.5, `suppressor cuts noise (${base.noise} -> ${Math.round(st.noise)})`);
+  ok(st.mag === 45 && st.zoom === 3, `extended mag 30 -> ${st.mag}, 3x zoom ${st.zoom}`);
+  ok(!p.stash.some(s => s.id === 'att_supp'), 'attachment moved from stash onto the gun');
+  applyAction(p, { a: 'attach', uid: gun.uid, idx: idxOf('att_6x') });
+  ok(gun.att.optic === 'att_6x' && p.stash.some(s => s.id === 'att_3x'), 'swapping an optic returns the old one to the stash');
+  let threw = false;
+  const pistol = makeStack('peashooter'); p.stash.push(pistol);
+  try { applyAction(p, { a: 'attach', uid: pistol.uid, idx: idxOf('att_3x') }); } catch { threw = true; }
+  ok(threw && !canAttach('peashooter', 'att_3x'), 'incompatible attachment rejected');
+  applyAction(p, { a: 'detach', uid: gun.uid, slot: 'mag' });
+  ok(!gun.att.mag && gun.mag <= 30 && p.stash.some(s => s.id === 'att_mag_ext'), 'detaching mag clamps loaded rounds and returns the mag');
+  for (const [m, n] of Object.entries({ scrap: 100, circuits: 40, alloy: 20, cheap_core: 4 })) p.stash.push(makeStack(m, n));
+  applyAction(p, { a: 'upgrade_gun', uid: gun.uid });
+  ok(gun.tier === 2 && weaponStats(gun).dmg > base.dmg, `tier upgrade raises damage (${base.dmg} -> ${weaponStats(gun).dmg.toFixed(1)})`);
+  gun.dur = 20;
+  ok(weaponStats(gun).jamChance > 0, 'worn guns can jam');
+  applyAction(p, { a: 'repair_gun', uid: gun.uid });
+  ok(gun.dur === 100, 'repair restores condition');
+  p.stash.push(makeStack('ammo_medium_ap', 60));
+  applyAction(p, { a: 'set_ammo', uid: gun.uid, type: 'ap' });
+  ok(gun.ammoType === 'ap' && gun.mag > 0 && weaponStats(gun).pen, `AP ammo loaded (${gun.mag} rds)`);
+  const d = decodeGear(gearKey(gun));
+  ok(d.id === 'ranger' && d.att.optic === 'att_6x' && d.tier === 2, 'gear key round-trips for remote rendering');
+  ok(upgradeCost({ id: 'ranger', tier: 4 }) === null, 'tier IV is max');
+  const sold = makeStack('buzz'); sold.att = { optic: 'att_reddot' }; p.stash.push(sold);
+  applyAction(p, { a: 'sell', idx: p.stash.indexOf(sold) });
+  ok(p.stash.some(s => s.id === 'att_reddot'), 'selling a gun returns its attachments');
+
+  // raid-side: wear, jams, ammo switching, AP vs shields
+  const world = generateWorld();
+  const raid = new Raid(world, { onResult: async () => ({}), onClosed() {} });
+  clearInterval(raid.interval);
+  raid.enemies.clear();
+  const mk = () => { const m = []; return { readyState: 1, send: (x) => m.push(JSON.parse(x)), msgs: m }; };
+  const shooter = newProfile('Shooter');
+  shooter.loadout.primary = makeStack('ranger');
+  shooter.loadout.pack.push(makeStack('ammo_medium', 90), makeStack('ammo_medium_hp', 60));
+  const ws = mk();
+  const { player: sp } = raid.addPlayer(shooter, prepareDeploy(shooter, raid.id), ws, 'SQ1');
+  const g = sp.inv.primary;
+  for (let i = 0; i < 5; i++) { raid.time += 0.2; raid.handle(shooter.id, { t: 'fire', d: [[0, 0, -1]], rt: raid.time }); }
+  ok(g.dur < 100 && g.mag === 25, `shots wear the gun (dur ${g.dur.toFixed(2)}, mag ${g.mag})`);
+  g.dur = 0.05; raid.time += 0.2;
+  raid.handle(shooter.id, { t: 'fire', d: [[0, 0, -1]], rt: raid.time });
+  g.jammed = false; raid.time += 0.2;
+  raid.handle(shooter.id, { t: 'fire', d: [[0, 0, -1]], rt: raid.time });
+  ok(g.dur === 0 && ws.msgs.some(m => m.t === 'msg' && /broken/.test(m.text)), 'a fully worn gun refuses to fire');
+  g.dur = 100; g.jammed = true;
+  const magBefore = g.mag;
+  raid.time += 0.2; raid.handle(shooter.id, { t: 'fire', d: [[0, 0, -1]], rt: raid.time });
+  ok(g.mag === magBefore, 'jammed gun does not fire');
+  raid.handle(shooter.id, { t: 'reload' });
+  ok(!g.jammed, 'R clears a jam');
+  sp.reloadUntil = 0; sp.reloading = null;
+  raid.handle(shooter.id, { t: 'ammo', type: 'hp' });
+  ok(g.ammoType === 'hp' && g.mag === 0 && sp.reloading, 'ammo switch unloads the mag and reloads with the new type');
+  raid.time = sp.reloadUntil + 0.01; raid.finishReload(sp);
+  ok(g.mag === 30 && countItem(sp.inv.pack, 'ammo_medium_hp') === 30, 'reload pulled HP rounds');
+  // AP vs shield absorption
+  const vp = newProfile('Target');
+  const { player: tgt } = raid.addPlayer(vp, prepareDeploy(vp, raid.id), mk(), 'SQ2');
+  tgt.inv.shield.charge = 40; const hp0 = tgt.hp;
+  raid.damagePlayer(tgt, 20, { kind: 'enemy', name: 't', x: 0, z: 0 }, { absorb: 1 });
+  const fmjHp = hp0 - tgt.hp;
+  tgt.hp = hp0; tgt.inv.shield.charge = 40;
+  raid.damagePlayer(tgt, 20, { kind: 'enemy', name: 't', x: 0, z: 0 }, { absorb: 0.5 });
+  ok(hp0 - tgt.hp > fmjHp, `AP rounds get through shields (FMJ ${fmjHp.toFixed(1)} vs AP ${(hp0 - tgt.hp).toFixed(1)} health damage)`);
+  raid.close();
 }
 
 // ---------------------------------------------------------------- spectating (in-process)

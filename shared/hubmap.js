@@ -12,6 +12,7 @@ export const HUB = {
 // Each station opens a hideout menu tab. `x,z` is where you stand to use it.
 export const KIOSKS = [
   { id: 'stash',     name: 'Stash & Loadout',  tab: 'loadout',   x: -17, z: -7, face: 1,  color: 0xd9822b },
+  { id: 'gunsmith',  name: 'Gunsmith Bench',    tab: 'gunsmith',  x: -17, z: -1, face: 1,  color: 0xc8ced6 },
   { id: 'trader',    name: "Penny's Counter",   tab: 'trader',    x: -17, z: 5,  face: 1,  color: 0xffc24b },
   { id: 'workbench', name: "Ox's Workbench",    tab: 'workbench', x: 17,  z: 5,  face: -1, color: 0x59b8ff },
   { id: 'contracts', name: 'Contract Board',    tab: 'contracts', x: 17,  z: -7, face: -1, color: 0x5fd17a },

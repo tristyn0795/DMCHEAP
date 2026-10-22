@@ -18,10 +18,21 @@ export function makeHuman(color, visor = 0xff8a2a) {
   const armR = new THREE.Mesh(armGeo, mat); armR.position.set(0.3, 1.4, -0.02);
   const armL = new THREE.Mesh(armGeo, mat); armL.position.set(-0.3, 1.4, -0.02);
   armL.rotation.y = -0.45;
+  armR.rotation.order = armL.rotation.order = 'YXZ';
   const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.75), new THREE.MeshLambertMaterial({ color: 0x1e1e1e })); gun.position.set(0.22, 1.36, -0.6);
   for (const m of [legL, legR, torso, head, pack, armR, armL, gun]) m.castShadow = true;
-  g.add(legL, legR, torso, head, vis, pack, armR, armL, gun);
-  return { group: g, legL, legR, armL, armR, gun, visor: vis, phase: 0 };
+  // detailed gun models (client/guns.js) hang off this mount: grip in the right hand, stock at the shoulder
+  const mount = new THREE.Group();
+  mount.position.set(0.26, 1.32, -0.2);
+  g.add(legL, legR, torso, head, vis, pack, armR, armL, gun, mount);
+  return { group: g, legL, legR, armL, armR, gun, mount, model: null, visor: vis, phase: 0 };
+}
+
+// Swap the gun model a character is holding (null = keep the placeholder box)
+export function setGunModel(h, built) {
+  if (h.model) h.mount.remove(h.model.group);
+  h.model = built;
+  if (built) h.mount.add(built.group);
 }
 
 export function makeLabel(text, color = '#ffc24b', sub = null) {
@@ -54,7 +65,9 @@ export function animHuman(h, { moving = false, crouch = false, downed = false, s
   const g = h.group;
   g.rotation.x = 0;
   g.position.y = 0;
-  h.gun.visible = armed;
+  h.gun.visible = armed && !h.model;
+  h.mount.visible = armed;
+  h.armR.scale.z = 1; h.armL.scale.z = 1; h.armL.rotation.x = 0;
   if (downed) {
     g.rotation.x = -Math.PI / 2 * 0.9;
     g.position.y = 0.3;
@@ -77,4 +90,14 @@ export function animHuman(h, { moving = false, crouch = false, downed = false, s
   else if (emote === 'sit') { ar = al = -0.6; }
   h.armR.rotation.x = ar; h.armL.rotation.x = al; h.armR.rotation.z = az;
   h.armL.rotation.y = armed ? -0.45 : 0;
+  if (armed && h.model) {
+    // right hand on the grip, left hand reaching for the foregrip
+    const f = h.model.fore;
+    h.armR.rotation.x = -0.55; h.armR.scale.z = 0.55;
+    const dx = h.mount.position.x + f.x - h.armL.position.x, dy = h.mount.position.y + f.y - h.armL.position.y, dz = h.mount.position.z + f.z - h.armL.position.z;
+    const len = Math.hypot(dx, dy, dz);
+    h.armL.rotation.y = Math.atan2(-dx, -dz);
+    h.armL.rotation.x = Math.asin(Math.max(-1, Math.min(1, dy / len)));
+    h.armL.scale.z = len / 0.55;
+  }
 }

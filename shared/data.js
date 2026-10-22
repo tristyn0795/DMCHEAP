@@ -53,16 +53,66 @@ export const RARITY = {
 };
 
 // ---------------------------------------------------------------- weapons
-// dmg per pellet, rpm, mag, ammo item, spread (radians, hip), range (full dmg), reload seconds
+// Grounded, DMZ-style fictional firearms. Base stats; attachments/tier/ammo/wear are applied by
+// weaponStats() in shared/gunsmith.js (used by BOTH server and client so they always agree).
+// dmg per pellet · rpm · mode (auto|semi|burst|pump|bolt) · mag · ammo = caliber item · spread (rad, hip)
+// range (full damage) · reload (s) · noise (AI hearing radius, m) · recoil: v/h kick (rad per shot), rec (recovery rad/s)
+// ads (s to aim) · sprintFire (s after sprinting before you can shoot) · head (headshot mult) · model (procedural mesh)
+// slots: allowed attachments per slot — true = any, false = none, [ids] = only those
+const ALL = { muzzle: true, barrel: true, optic: true, mag: true, grip: true };
 export const WEAPONS = {
-  peashooter: { name: 'Peashooter', cls: 'Pistol',   dmg: 19, pellets: 1, rpm: 320, auto: false, mag: 12, ammo: 'ammo_light',  spread: 0.018, range: 60,  reload: 1.4, noise: 50 },
-  buzz:       { name: 'Buzz',       cls: 'SMG',      dmg: 13, pellets: 1, rpm: 820, auto: true,  mag: 30, ammo: 'ammo_light',  spread: 0.032, range: 45,  reload: 2.0, noise: 55 },
-  doorknock:  { name: 'Doorknock',  cls: 'Shotgun',  dmg: 11, pellets: 8, rpm: 75,  auto: false, mag: 6,  ammo: 'ammo_shell',  spread: 0.085, range: 22,  reload: 3.0, noise: 70 },
-  ranger:     { name: 'Ranger',     cls: 'Rifle',    dmg: 21, pellets: 1, rpm: 600, auto: true,  mag: 30, ammo: 'ammo_medium', spread: 0.02,  range: 90,  reload: 2.2, noise: 70 },
-  longshot:   { name: 'Longshot',   cls: 'Marksman', dmg: 62, pellets: 1, rpm: 70,  auto: false, mag: 5,  ammo: 'ammo_heavy',  spread: 0.003, range: 170, reload: 2.6, noise: 90 },
-  hauler:     { name: 'Hauler',     cls: 'LMG',      dmg: 22, pellets: 1, rpm: 640, auto: true,  mag: 80, ammo: 'ammo_medium', spread: 0.034, range: 90,  reload: 4.5, noise: 80 },
-  gilded:     { name: 'Gilded Ranger', cls: 'Rifle', dmg: 27, pellets: 1, rpm: 660, auto: true,  mag: 40, ammo: 'ammo_medium', spread: 0.015, range: 110, reload: 2.0, noise: 65 },
+  peashooter: { name: 'P-17 Pistol',      cls: 'Pistol',   dmg: 19, pellets: 1, rpm: 320, mode: 'semi',  mag: 12, ammo: 'ammo_light',  spread: 0.018, range: 60,  reload: 1.4, noise: 50, recoil: { v: 0.014, h: 0.006, rec: 1.0 }, ads: 0.12, sprintFire: 0.1,  head: 1.8, model: 'pistol',
+    slots: { muzzle: ['att_supp', 'att_comp'], barrel: false, optic: ['att_reddot'], mag: ['att_mag_ext', 'att_mag_fast'], grip: false } },
+  revolver:   { name: 'R-44 Revolver',    cls: 'Revolver', dmg: 46, pellets: 1, rpm: 150, mode: 'semi',  mag: 6,  ammo: 'ammo_heavy',  spread: 0.012, range: 70,  reload: 2.6, noise: 75, recoil: { v: 0.05, h: 0.01, rec: 0.8 },   ads: 0.14, sprintFire: 0.12, head: 2.0, model: 'revolver',
+    slots: { muzzle: false, barrel: ['att_barrel_long'], optic: ['att_reddot', 'att_holo'], mag: ['att_mag_fast'], grip: false } },
+  buzz:       { name: 'MX-9 SMG',         cls: 'SMG',      dmg: 13, pellets: 1, rpm: 820, mode: 'auto',  mag: 30, ammo: 'ammo_light',  spread: 0.032, range: 45,  reload: 2.0, noise: 55, recoil: { v: 0.007, h: 0.007, rec: 1.3 }, ads: 0.16, sprintFire: 0.12, head: 1.6, model: 'smg',
+    slots: { ...ALL, optic: ['att_reddot', 'att_holo', 'att_3x'] } },
+  doorknock:  { name: 'M8 Pump Shotgun',  cls: 'Shotgun',  dmg: 11, pellets: 8, rpm: 75,  mode: 'pump',  mag: 6,  ammo: 'ammo_shell',  spread: 0.085, range: 22,  reload: 3.0, noise: 70, recoil: { v: 0.065, h: 0.015, rec: 0.9 }, ads: 0.2,  sprintFire: 0.15, head: 1.3, model: 'shotgun',
+    slots: { muzzle: ['att_comp', 'att_brake', 'att_supp'], barrel: true, optic: ['att_reddot', 'att_holo'], mag: ['att_mag_ext'], grip: true } },
+  ranger:     { name: 'RG-4 Carbine',     cls: 'Rifle',    dmg: 21, pellets: 1, rpm: 600, mode: 'auto',  mag: 30, ammo: 'ammo_medium', spread: 0.02,  range: 90,  reload: 2.2, noise: 70, recoil: { v: 0.010, h: 0.007, rec: 1.0 }, ads: 0.2,  sprintFire: 0.18, head: 1.8, model: 'carbine', slots: ALL },
+  br7:        { name: 'BR-7 Burst Rifle', cls: 'Rifle',    dmg: 24, pellets: 1, rpm: 900, mode: 'burst', burst: 3, burstDelay: 0.32, mag: 30, ammo: 'ammo_medium', spread: 0.017, range: 100, reload: 2.3, noise: 70, recoil: { v: 0.011, h: 0.005, rec: 1.2 }, ads: 0.22, sprintFire: 0.2, head: 1.8, model: 'burst', slots: ALL },
+  k47:        { name: 'K-47 Rifle',       cls: 'Rifle',    dmg: 29, pellets: 1, rpm: 560, mode: 'auto',  mag: 30, ammo: 'ammo_heavy',  spread: 0.024, range: 85,  reload: 2.5, noise: 80, recoil: { v: 0.015, h: 0.011, rec: 0.9 }, ads: 0.24, sprintFire: 0.22, head: 1.8, model: 'k47', slots: ALL },
+  longshot:   { name: 'LS-14 DMR',        cls: 'Marksman', dmg: 56, pellets: 1, rpm: 110, mode: 'semi',  mag: 10, ammo: 'ammo_heavy',  spread: 0.004, range: 170, reload: 2.6, noise: 90, recoil: { v: 0.035, h: 0.008, rec: 0.9 }, ads: 0.28, sprintFire: 0.25, head: 2.0, model: 'dmr', slots: ALL },
+  mk2:        { name: 'MK-2 Bolt Sniper', cls: 'Sniper',   dmg: 95, pellets: 1, rpm: 45,  mode: 'bolt',  mag: 5,  ammo: 'ammo_heavy',  spread: 0.002, range: 220, reload: 3.0, noise: 95, recoil: { v: 0.075, h: 0.01, rec: 0.7 },  ads: 0.35, sprintFire: 0.3,  head: 2.4, model: 'sniper',
+    slots: { muzzle: ['att_supp', 'att_supp_heavy', 'att_brake'], barrel: ['att_barrel_long'], optic: ['att_3x', 'att_6x'], mag: ['att_mag_ext'], grip: ['att_stock'] } },
+  hauler:     { name: 'HL-60 LMG',        cls: 'LMG',      dmg: 22, pellets: 1, rpm: 640, mode: 'auto',  mag: 80, ammo: 'ammo_medium', spread: 0.034, range: 90,  reload: 4.5, noise: 80, recoil: { v: 0.012, h: 0.010, rec: 0.8 }, ads: 0.35, sprintFire: 0.35, head: 1.6, move: 0.93, model: 'lmg',
+    slots: { ...ALL, mag: ['att_mag_fast'] } },
+  gilded:     { name: "RG-4 'Gilded'",    cls: 'Rifle',    dmg: 27, pellets: 1, rpm: 660, mode: 'auto',  mag: 40, ammo: 'ammo_medium', spread: 0.015, range: 110, reload: 2.0, noise: 65, recoil: { v: 0.008, h: 0.006, rec: 1.2 }, ads: 0.18, sprintFire: 0.15, head: 1.8, model: 'carbine', gold: true, slots: ALL },
 };
+for (const w of Object.values(WEAPONS)) w.auto = w.mode === 'auto';
+
+// ---------------------------------------------------------------- attachments (5-slot gunsmith)
+// mods multiply base stats: dmg, range, noise, ads, reload, recoilV, recoilH, recover, hip (hip spread),
+// adsSpread, moveSpread, move (walk speed), mag (capacity). zoom = optic magnification.
+export const ATT_SLOTS = ['muzzle', 'barrel', 'optic', 'mag', 'grip'];
+export const ATT_SLOT_NAMES = { muzzle: 'Muzzle', barrel: 'Barrel', optic: 'Optic', mag: 'Magazine', grip: 'Grip / Stock' };
+export const ATTACHMENTS = {
+  att_comp:         { slot: 'muzzle', name: 'Compensator',      rarity: 'uncommon', value: 500,  mods: { recoilH: 0.75, recoilV: 0.92, noise: 1.1 } },
+  att_brake:        { slot: 'muzzle', name: 'Muzzle Brake',     rarity: 'uncommon', value: 550,  mods: { recoilV: 0.8, ads: 1.05 } },
+  att_supp:         { slot: 'muzzle', name: 'Suppressor',       rarity: 'rare',     value: 1400, mods: { noise: 0.35, range: 0.9, ads: 1.05 }, suppress: true },
+  att_supp_heavy:   { slot: 'muzzle', name: 'Heavy Suppressor', rarity: 'epic',     value: 3200, mods: { noise: 0.25, range: 1.05, ads: 1.12, recoilV: 0.92 }, suppress: true },
+  att_barrel_long:  { slot: 'barrel', name: 'Long Barrel',      rarity: 'rare',     value: 1200, mods: { range: 1.25, dmg: 1.05, ads: 1.1, hip: 1.1 } },
+  att_barrel_short: { slot: 'barrel', name: 'Short Barrel',     rarity: 'uncommon', value: 700,  mods: { range: 0.85, ads: 0.85, hip: 0.88 } },
+  att_reddot:       { slot: 'optic',  name: 'Red Dot',          rarity: 'common',   value: 350,  mods: { adsSpread: 0.85 }, zoom: 1.3 },
+  att_holo:         { slot: 'optic',  name: 'Holo Sight',       rarity: 'uncommon', value: 650,  mods: { adsSpread: 0.8, ads: 1.03 }, zoom: 1.5 },
+  att_3x:           { slot: 'optic',  name: '3x Scope',         rarity: 'rare',     value: 1300, mods: { adsSpread: 0.75, ads: 1.15 }, zoom: 3 },
+  att_6x:           { slot: 'optic',  name: '6x Scope',         rarity: 'epic',     value: 2600, mods: { adsSpread: 0.7, ads: 1.25 }, zoom: 6 },
+  att_mag_ext:      { slot: 'mag',    name: 'Extended Mag',     rarity: 'uncommon', value: 600,  mods: { mag: 1.5, reload: 1.1 } },
+  att_mag_drum:     { slot: 'mag',    name: 'Drum Mag',         rarity: 'epic',     value: 2200, mods: { mag: 2.2, reload: 1.35, ads: 1.1, move: 0.96 } },
+  att_mag_fast:     { slot: 'mag',    name: 'Fast Mag',         rarity: 'rare',     value: 900,  mods: { reload: 0.75 } },
+  att_vgrip:        { slot: 'grip',   name: 'Vertical Grip',    rarity: 'uncommon', value: 500,  mods: { recoilV: 0.85, recoilH: 0.9 } },
+  att_agrip:        { slot: 'grip',   name: 'Angled Grip',      rarity: 'uncommon', value: 550,  mods: { ads: 0.85 } },
+  att_stock:        { slot: 'grip',   name: 'Tactical Stock',   rarity: 'rare',     value: 1100, mods: { recover: 1.3, moveSpread: 0.8 } },
+};
+
+// ---------------------------------------------------------------- ammo types
+// absorb: multiplier on how much a shield soaks (AP punches through, HP splashes on it); machine: vs CHEAP machines.
+export const AMMO_TYPES = {
+  fmj: { name: 'FMJ', suffix: '',    dmg: 1,    absorb: 1,   machine: 1 },
+  ap:  { name: 'AP',  suffix: '_ap', dmg: 0.95, absorb: 0.5, machine: 1.25, pen: true },
+  hp:  { name: 'HP',  suffix: '_hp', dmg: 1.2,  absorb: 1.4, machine: 0.85 },
+};
+export const AMMO_ORDER = ['fmj', 'ap', 'hp'];
 export const HEADSHOT_MULT = 1.8;
 export const ADS_SPREAD_MULT = 0.35;
 export const MOVE_SPREAD_MULT = 1.6;
@@ -72,13 +122,17 @@ export const MOVE_SPREAD_MULT = 1.6;
 // recycle: what the Workbench breaks it into (Arc Raiders style recycling)
 export const ITEMS = {
   // weapons
-  peashooter: { name: 'Peashooter',    type: 'weapon', rarity: 'common',    value: 400,   stack: 1, recycle: { scrap: 3 } },
-  buzz:       { name: 'Buzz SMG',      type: 'weapon', rarity: 'uncommon',  value: 1400,  stack: 1, recycle: { scrap: 8, wires: 2 } },
-  doorknock:  { name: 'Doorknock',     type: 'weapon', rarity: 'uncommon',  value: 1600,  stack: 1, recycle: { scrap: 8, alloy: 1 } },
-  ranger:     { name: 'Ranger AR',     type: 'weapon', rarity: 'rare',      value: 3200,  stack: 1, recycle: { scrap: 10, alloy: 2, circuits: 2 } },
-  longshot:   { name: 'Longshot DMR',  type: 'weapon', rarity: 'epic',      value: 5600,  stack: 1, recycle: { alloy: 4, circuits: 3 } },
-  hauler:     { name: 'Hauler LMG',    type: 'weapon', rarity: 'epic',      value: 6200,  stack: 1, recycle: { alloy: 5, circuits: 3 } },
-  gilded:     { name: 'Gilded Ranger', type: 'weapon', rarity: 'legendary', value: 16000, stack: 1, recycle: { alloy: 8, cheap_core: 2 } },
+  peashooter: { name: 'P-17 Pistol',      type: 'weapon', rarity: 'common',    value: 400,   stack: 1, recycle: { scrap: 3 } },
+  revolver:   { name: 'R-44 Revolver',    type: 'weapon', rarity: 'uncommon',  value: 1300,  stack: 1, recycle: { scrap: 6, alloy: 1 } },
+  buzz:       { name: 'MX-9 SMG',         type: 'weapon', rarity: 'uncommon',  value: 1400,  stack: 1, recycle: { scrap: 8, wires: 2 } },
+  doorknock:  { name: 'M8 Pump Shotgun',  type: 'weapon', rarity: 'uncommon',  value: 1600,  stack: 1, recycle: { scrap: 8, alloy: 1 } },
+  ranger:     { name: 'RG-4 Carbine',     type: 'weapon', rarity: 'rare',      value: 3200,  stack: 1, recycle: { scrap: 10, alloy: 2, circuits: 2 } },
+  br7:        { name: 'BR-7 Burst Rifle', type: 'weapon', rarity: 'rare',      value: 3600,  stack: 1, recycle: { scrap: 10, alloy: 3, circuits: 2 } },
+  k47:        { name: 'K-47 Rifle',       type: 'weapon', rarity: 'rare',      value: 3900,  stack: 1, recycle: { scrap: 12, alloy: 3, circuits: 1 } },
+  longshot:   { name: 'LS-14 DMR',        type: 'weapon', rarity: 'epic',      value: 5600,  stack: 1, recycle: { alloy: 4, circuits: 3 } },
+  mk2:        { name: 'MK-2 Bolt Sniper', type: 'weapon', rarity: 'epic',      value: 6800,  stack: 1, recycle: { alloy: 5, circuits: 3, cheap_core: 1 } },
+  hauler:     { name: 'HL-60 LMG',        type: 'weapon', rarity: 'epic',      value: 6200,  stack: 1, recycle: { alloy: 5, circuits: 3 } },
+  gilded:     { name: "RG-4 'Gilded'",    type: 'weapon', rarity: 'legendary', value: 16000, stack: 1, recycle: { alloy: 8, cheap_core: 2 } },
 
   // ammo
   ammo_light:  { name: 'Light Ammo',  type: 'ammo', rarity: 'common',   value: 4,  stack: 150 },
@@ -130,6 +184,18 @@ export const ITEMS = {
   hatch_key:   { name: 'Hatch Key',         type: 'key', rarity: 'uncommon', value: 800, stack: 1, desc: 'Opens a raider hatch for a quiet solo extraction.' },
 };
 
+// attachments and AP/HP ammo variants are generated from their tables
+for (const [id, a] of Object.entries(ATTACHMENTS)) {
+  ITEMS[id] = { name: a.name, type: 'attachment', slot: a.slot, rarity: a.rarity, value: a.value, stack: 1, recycle: { scrap: 2, ...(a.value >= 1000 ? { alloy: 1 } : { wires: 1 }) } };
+}
+for (const base of ['ammo_light', 'ammo_medium', 'ammo_heavy', 'ammo_shell']) {
+  const b = ITEMS[base];
+  for (const t of ['ap', 'hp']) {
+    ITEMS[base + AMMO_TYPES[t].suffix] = { name: `${b.name} (${AMMO_TYPES[t].name})`, type: 'ammo', rarity: t === 'ap' ? 'rare' : 'uncommon', value: Math.round(b.value * (t === 'ap' ? 2.2 : 1.6)), stack: b.stack, caliber: base, ammoType: t };
+  }
+  b.caliber = base; b.ammoType = 'fmj';
+}
+
 export function itemName(id) { return ITEMS[id]?.name ?? id; }
 export function stackSize(id) { return ITEMS[id]?.stack ?? 1; }
 
@@ -150,10 +216,13 @@ export const LOOT_TABLES = {
   crate:      [['scrap', 30, [2, 6]], ['wires', 18, [1, 4]], ['cassette', 14, [1, 2]], ['ammo_light', 12, [15, 40]], ['ammo_medium', 10, [15, 40]], ['bandage', 10, [1, 2]], ['old_phone', 8, [1, 1]], ['toaster', 5, [1, 1]], ['chem', 8, [1, 2]], ['hatch_key', 1.2, [1, 1]]],
   toolbox:    [['scrap', 30, [4, 10]], ['wires', 22, [2, 6]], ['circuits', 14, [1, 3]], ['chem', 12, [1, 3]], ['alloy', 5, [1, 2]], ['toaster', 4, [1, 1]]],
   medbox:     [['bandage', 40, [1, 3]], ['shield_cell', 30, [1, 2]], ['chem', 14, [1, 3]], ['medkit', 8, [1, 1]], ['tourniquet', 2.5, [1, 1]]],
-  weaponcase: [['peashooter', 14, [1, 1]], ['buzz', 12, [1, 1]], ['doorknock', 10, [1, 1]], ['ranger', 6, [1, 1]], ['longshot', 1.5, [1, 1]], ['hauler', 1.5, [1, 1]], ['ammo_light', 18, [20, 60]], ['ammo_medium', 18, [20, 60]], ['ammo_shell', 10, [6, 16]], ['ammo_heavy', 6, [5, 15]], ['frag', 10, [1, 2]], ['lure', 5, [1, 1]], ['shield_light', 6, [1, 1]], ['shield_medium', 2, [1, 1]], ['rig_scav', 4, [1, 1]]],
-  safe:       [['gold_watch', 22, [1, 2]], ['gold_bar', 8, [1, 1]], ['data_drive', 16, [1, 2]], ['old_phone', 20, [1, 2]], ['cheap_core', 6, [1, 1]], ['key_depot', 3, [1, 1]], ['key_mall', 3, [1, 1]], ['key_reactor', 1.5, [1, 1]], ['hatch_key', 4, [1, 1]], ['rig_runner', 2, [1, 1]], ['shield_heavy', 1, [1, 1]], ['rig_smuggler', 0.7, [1, 1]]],
-  cache:      [['alloy', 18, [1, 3]], ['circuits', 20, [2, 4]], ['gold_watch', 10, [1, 1]], ['medkit', 10, [1, 1]], ['ammo_heavy', 10, [5, 12]], ['frag', 12, [1, 2]], ['key_depot', 4, [1, 1]], ['key_mall', 4, [1, 1]], ['hatch_key', 6, [1, 1]], ['shield_medium', 4, [1, 1]], ['rig_hauler', 2, [1, 1]]],
-  merc:       [['ammo_medium', 30, [10, 30]], ['ammo_light', 20, [10, 30]], ['bandage', 20, [1, 2]], ['ranger', 4, [1, 1]], ['buzz', 7, [1, 1]], ['doorknock', 5, [1, 1]], ['frag', 8, [1, 1]], ['shield_cell', 10, [1, 1]], ['gold_watch', 3, [1, 1]], ['key_depot', 1.5, [1, 1]], ['hatch_key', 1.5, [1, 1]]],
+  weaponcase: [['peashooter', 14, [1, 1]], ['buzz', 12, [1, 1]], ['doorknock', 10, [1, 1]], ['ranger', 6, [1, 1]], ['longshot', 1.5, [1, 1]], ['hauler', 1.5, [1, 1]], ['ammo_light', 18, [20, 60]], ['ammo_medium', 18, [20, 60]], ['ammo_shell', 10, [6, 16]], ['ammo_heavy', 6, [5, 15]], ['frag', 10, [1, 2]], ['lure', 5, [1, 1]], ['shield_light', 6, [1, 1]], ['shield_medium', 2, [1, 1]], ['rig_scav', 4, [1, 1]], ['revolver', 6, [1, 1]], ['br7', 3, [1, 1]], ['k47', 3, [1, 1]], ['mk2', 1, [1, 1]],
+    ['att_reddot', 8, [1, 1]], ['att_comp', 5, [1, 1]], ['att_vgrip', 5, [1, 1]], ['att_mag_ext', 5, [1, 1]], ['att_holo', 4, [1, 1]], ['att_brake', 4, [1, 1]], ['att_agrip', 4, [1, 1]], ['att_barrel_short', 3, [1, 1]],
+    ['att_supp', 2, [1, 1]], ['att_3x', 2, [1, 1]], ['att_stock', 2, [1, 1]], ['att_mag_fast', 2, [1, 1]], ['att_barrel_long', 2, [1, 1]],
+    ['ammo_medium_ap', 4, [10, 30]], ['ammo_light_hp', 4, [15, 40]], ['ammo_heavy_ap', 2, [5, 12]], ['ammo_shell_hp', 3, [6, 12]]],
+  safe:       [['gold_watch', 22, [1, 2]], ['gold_bar', 8, [1, 1]], ['data_drive', 16, [1, 2]], ['old_phone', 20, [1, 2]], ['cheap_core', 6, [1, 1]], ['key_depot', 3, [1, 1]], ['key_mall', 3, [1, 1]], ['key_reactor', 1.5, [1, 1]], ['hatch_key', 4, [1, 1]], ['rig_runner', 2, [1, 1]], ['shield_heavy', 1, [1, 1]], ['rig_smuggler', 0.7, [1, 1]], ['att_supp', 3, [1, 1]], ['att_6x', 1, [1, 1]], ['att_mag_drum', 1, [1, 1]], ['att_supp_heavy', 0.7, [1, 1]]],
+  cache:      [['alloy', 18, [1, 3]], ['circuits', 20, [2, 4]], ['gold_watch', 10, [1, 1]], ['medkit', 10, [1, 1]], ['ammo_heavy', 10, [5, 12]], ['frag', 12, [1, 2]], ['key_depot', 4, [1, 1]], ['key_mall', 4, [1, 1]], ['hatch_key', 6, [1, 1]], ['shield_medium', 4, [1, 1]], ['rig_hauler', 2, [1, 1]], ['att_3x', 4, [1, 1]], ['att_supp', 3, [1, 1]], ['att_mag_fast', 3, [1, 1]], ['ammo_heavy_ap', 6, [5, 12]], ['ammo_medium_ap', 6, [10, 30]], ['k47', 2, [1, 1]], ['mk2', 1, [1, 1]]],
+  merc:       [['ammo_medium', 30, [10, 30]], ['ammo_light', 20, [10, 30]], ['bandage', 20, [1, 2]], ['ranger', 4, [1, 1]], ['buzz', 7, [1, 1]], ['doorknock', 5, [1, 1]], ['frag', 8, [1, 1]], ['shield_cell', 10, [1, 1]], ['gold_watch', 3, [1, 1]], ['key_depot', 1.5, [1, 1]], ['hatch_key', 1.5, [1, 1]], ['k47', 4, [1, 1]], ['br7', 2, [1, 1]], ['att_reddot', 4, [1, 1]], ['att_vgrip', 3, [1, 1]], ['att_comp', 3, [1, 1]], ['ammo_medium_hp', 5, [10, 25]]],
 };
 
 // Number of rolls per container, by type
@@ -183,6 +252,37 @@ export const RECIPES = [
   { out: 'hauler',      qty: 1,  lvl: 3, cost: { alloy: 10, circuits: 6, cheap_core: 2 } },
   { out: 'shield_heavy', qty: 1, lvl: 3, cost: { alloy: 6, circuits: 5, cheap_core: 1 } },
   { out: 'rig_smuggler', qty: 1, lvl: 3, cost: { alloy: 5, circuits: 4, cheap_core: 1 } },
+  // guns
+  { out: 'revolver',    qty: 1, lvl: 1, cost: { scrap: 16, alloy: 1 } },
+  { out: 'br7',         qty: 1, lvl: 2, cost: { scrap: 25, alloy: 5, circuits: 4 } },
+  { out: 'k47',         qty: 1, lvl: 2, cost: { scrap: 30, alloy: 5, circuits: 2 } },
+  { out: 'mk2',         qty: 1, lvl: 3, cost: { alloy: 10, circuits: 5, cheap_core: 1 } },
+  // ammo variants
+  { out: 'ammo_light_ap',  qty: 30, lvl: 2, cost: { scrap: 4, alloy: 1 } },
+  { out: 'ammo_light_hp',  qty: 30, lvl: 1, cost: { scrap: 4, chem: 1 } },
+  { out: 'ammo_medium_ap', qty: 30, lvl: 2, cost: { scrap: 6, alloy: 1 } },
+  { out: 'ammo_medium_hp', qty: 30, lvl: 1, cost: { scrap: 6, chem: 2 } },
+  { out: 'ammo_heavy_ap',  qty: 10, lvl: 2, cost: { scrap: 4, alloy: 1, chem: 1 } },
+  { out: 'ammo_heavy_hp',  qty: 10, lvl: 2, cost: { scrap: 4, chem: 3 } },
+  { out: 'ammo_shell_ap',  qty: 10, lvl: 2, cost: { scrap: 5, alloy: 1 } },
+  { out: 'ammo_shell_hp',  qty: 10, lvl: 1, cost: { scrap: 4, chem: 2 } },
+  // attachments
+  { out: 'att_reddot',       qty: 1, lvl: 1, cost: { scrap: 4, wires: 2, circuits: 1 } },
+  { out: 'att_comp',         qty: 1, lvl: 1, cost: { scrap: 8 } },
+  { out: 'att_vgrip',        qty: 1, lvl: 1, cost: { scrap: 6 } },
+  { out: 'att_mag_ext',      qty: 1, lvl: 1, cost: { scrap: 8, wires: 1 } },
+  { out: 'att_brake',        qty: 1, lvl: 2, cost: { scrap: 10, alloy: 1 } },
+  { out: 'att_agrip',        qty: 1, lvl: 2, cost: { scrap: 8, alloy: 1 } },
+  { out: 'att_holo',         qty: 1, lvl: 2, cost: { wires: 4, circuits: 2 } },
+  { out: 'att_barrel_short', qty: 1, lvl: 2, cost: { scrap: 10, alloy: 1 } },
+  { out: 'att_barrel_long',  qty: 1, lvl: 2, cost: { scrap: 12, alloy: 2 } },
+  { out: 'att_supp',         qty: 1, lvl: 2, cost: { scrap: 10, alloy: 3, chem: 1 } },
+  { out: 'att_3x',           qty: 1, lvl: 2, cost: { wires: 4, circuits: 3, alloy: 1 } },
+  { out: 'att_stock',        qty: 1, lvl: 2, cost: { scrap: 12, alloy: 2 } },
+  { out: 'att_mag_fast',     qty: 1, lvl: 2, cost: { scrap: 10, wires: 3, alloy: 1 } },
+  { out: 'att_6x',           qty: 1, lvl: 3, cost: { circuits: 5, alloy: 3, cheap_core: 1 } },
+  { out: 'att_mag_drum',     qty: 1, lvl: 3, cost: { scrap: 20, alloy: 4, circuits: 2 } },
+  { out: 'att_supp_heavy',   qty: 1, lvl: 3, cost: { alloy: 6, chem: 2, cheap_core: 1 } },
 ];
 
 export const BENCH_UPGRADES = {
@@ -192,7 +292,8 @@ export const BENCH_UPGRADES = {
 
 // ---------------------------------------------------------------- trader (Penny, the Quartermaster)
 export const TRADER_STOCK = [
-  'peashooter', 'buzz', 'doorknock', 'ammo_light', 'ammo_medium', 'ammo_shell', 'ammo_heavy',
+  'peashooter', 'revolver', 'buzz', 'doorknock', 'ammo_light', 'ammo_medium', 'ammo_shell', 'ammo_heavy',
+  'ammo_light_hp', 'ammo_medium_hp', 'att_reddot', 'att_comp', 'att_vgrip', 'att_mag_ext',
   'bandage', 'shield_cell', 'frag', 'shield_light', 'rig_scav', 'scrap', 'chem',
 ];
 export const BUY_MARKUP = 1.6;
@@ -242,7 +343,7 @@ export function makeStack(id, qty = 1) {
   const s = { id, qty };
   const it = ITEMS[id];
   if (!it) return s;
-  if (it.type === 'weapon') { s.uid = newUid(); s.mag = WEAPONS[id].mag; s.qty = 1; }
+  if (it.type === 'weapon') { s.uid = newUid(); s.mag = WEAPONS[id].mag; s.qty = 1; s.att = {}; s.tier = 1; s.dur = 100; s.ammoType = 'fmj'; }
   if (it.type === 'shield') { s.charge = it.cap; s.qty = 1; }
   if (it.type === 'rig') s.qty = 1;
   return s;

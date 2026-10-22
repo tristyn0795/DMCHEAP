@@ -1,5 +1,7 @@
 // Small DOM helpers shared by the hideout and the in-raid inventory.
-import { ITEMS, WEAPONS, RARITY } from '/shared/data.js';
+import { ITEMS, RARITY, AMMO_TYPES } from '/shared/data.js';
+import { weaponStats, gunName, JAM_BELOW } from '/shared/gunsmith.js';
+import { gunIcon, attIcon } from './guns.js';
 
 export const $ = (s, r = document) => r.querySelector(s);
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -8,7 +10,13 @@ export const money = (n) => '$' + Math.round(n).toLocaleString();
 export function itemSub(s) {
   const it = ITEMS[s.id];
   if (!it) return '';
-  if (it.type === 'weapon') return `${WEAPONS[s.id].cls} · ${s.mag ?? 0}/${WEAPONS[s.id].mag}`;
+  if (it.type === 'weapon') {
+    const st = weaponStats(s);
+    if (s.mag == null) return `${st.cls} · ${st.mag} rds · ${st.mode}`; // shop listing (no instance yet)
+    const dur = Math.round(s.dur ?? 100);
+    return `${st.cls} · ${s.mag ?? 0}/${st.mag}${(s.ammoType ?? 'fmj') !== 'fmj' ? ' ' + AMMO_TYPES[s.ammoType].name : ''} · ${dur < JAM_BELOW ? '⚠ ' : ''}${dur}%`;
+  }
+  if (it.type === 'attachment') return `Attachment · ${it.slot}`;
   if (it.type === 'shield') return `Shield ${Math.round(s.charge ?? 0)}/${it.cap}`;
   if (it.type === 'rig') return `${it.slots} slots · ${it.safe} safe`;
   if (it.type === 'ammo') return 'Ammo';
@@ -19,8 +27,10 @@ export function itemHTML(s, { idx, src, insured } = {}) {
   if (!s) return `<div class="item empty">empty</div>`;
   const it = ITEMS[s.id] ?? { name: s.id, rarity: 'common' };
   const rc = RARITY[it.rarity]?.color ?? '#888';
-  return `<div class="item" style="--rc:${rc}" data-idx="${idx ?? ''}" data-src="${src ?? ''}" title="${esc(it.desc ?? it.name)}">
-    <div class="nm">${esc(it.name)}</div><div class="sub">${esc(itemSub(s))}</div>
+  const name = it.type === 'weapon' ? gunName(s) : it.name;
+  const icon = it.type === 'weapon' ? gunIcon(s) : it.type === 'attachment' ? attIcon(s.id) : null;
+  return `<div class="item${icon ? ' has-icon' : ''}" style="--rc:${rc}" data-idx="${idx ?? ''}" data-src="${src ?? ''}" title="${esc(it.desc ?? name)}">
+    ${icon ? `<img class="ico" src="${icon}" alt="">` : ''}<div class="nm">${esc(name)}</div><div class="sub">${esc(itemSub(s))}</div>
     ${s.qty > 1 ? `<div class="q">x${s.qty}</div>` : ''}${insured ? '<div class="ins">INSURED</div>' : ''}</div>`;
 }
 

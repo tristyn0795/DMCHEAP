@@ -4,12 +4,30 @@ import {
   buyPrice, sellPrice, xpToNext, countItem,
 } from '/shared/data.js';
 import { $, esc, money, itemHTML, showMenu, toast } from './ui.js';
+import { ATTACHMENTS, ATT_SLOTS, ATT_SLOT_NAMES, AMMO_TYPES, AMMO_ORDER } from '/shared/data.js';
+import { weaponStats, canAttach, slotOpen, upgradeCost, repairCost, gunName, MAX_TIER, TIER_NAMES } from '/shared/gunsmith.js';
+import { gunIcon } from './guns.js';
+
+const MOD_LABELS = { dmg: 'Damage', range: 'Range', noise: 'Noise', ads: 'Aim time', reload: 'Reload time', recoilV: 'Vertical recoil', recoilH: 'Horizontal recoil', recover: 'Recoil recovery', hip: 'Hip spread', adsSpread: 'Aimed spread', moveSpread: 'Moving spread', move: 'Move speed', mag: 'Mag size' };
+const GOOD_UP = new Set(['dmg', 'range', 'recover', 'move', 'mag']);
+export function describeMods(id) {
+  const A = ATTACHMENTS[id];
+  const parts = Object.entries(A.mods).map(([k, v]) => {
+    const pct = Math.round((v - 1) * 100);
+    const good = GOOD_UP.has(k) ? pct > 0 : pct < 0;
+    return `<span class="${good ? 'ok' : 'no'}">${MOD_LABELS[k] ?? k} ${pct > 0 ? '+' : ''}${pct}%</span>`;
+  });
+  if (A.zoom) parts.unshift(`<span class="ok">${A.zoom}x zoom</span>`);
+  if (A.suppress) parts.unshift('<span class="ok">Suppressed: hides you from distant ears &amp; the map</span>');
+  return parts.join(' · ');
+}
 
 export class Hideout {
   constructor(net) {
     this.net = net;
     this.profile = null;
     this.tab = 'loadout';
+    this.gsUid = null;
     this.leaderboard = [];
     $('#tabs').addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-tab]');
@@ -127,6 +145,68 @@ export class Hideout {
       <div class="panel"><h3>Sell from stash</h3>${sell || '<p class="cost">Nothing to sell.</p>'}</div></div>`;
   }
 
+  // ---------------------------------------------------------------- gunsmith (5 slots, tiers, repair, ammo)
+  allGuns(p) {
+    const out = [];
+    for (const k of ['primary', 'secondary']) if (p.loadout[k]) out.push({ s: p.loadout[k], where: k === 'primary' ? 'Primary' : 'Secondary' });
+    for (const s of p.loadout.pack) if (ITEMS[s.id]?.type === 'weapon') out.push({ s, where: 'Backpack' });
+    for (const s of p.stash) if (ITEMS[s.id]?.type === 'weapon') out.push({ s, where: 'Stash' });
+    return out;
+  }
+
+  tab_gunsmith(p) {
+    const guns = this.allGuns(p);
+    if (!guns.length) return '<div class="panel"><h3>Gunsmith</h3><p class="cost">No weapons. Buy one from Penny or craft one at the Workbench.</p></div>';
+    let sel = guns.find(g => g.s.uid === this.gsUid) ?? guns[0];
+    this.gsUid = sel.s.uid;
+    const g = sel.s;
+    const st = weaponStats(g);
+    const have = (id) => countItem(p.stash, id);
+    const list = guns.map(x => `<div class="gs-gun ${x.s.uid === g.uid ? 'sel' : ''}" data-gs="sel" data-arg="${x.s.uid}">
+        <img src="${gunIcon(x.s) ?? ''}" alt=""><div><b>${esc(gunName(x.s))}</b><div class="cost">${x.where} · ${Math.round(x.s.dur ?? 100)}%</div></div></div>`).join('');
+    const bar = (label, v, txt) => `<div class="gs-stat"><span>${label}</span><div class="prog"><div style="width:${Math.max(3, Math.min(100, v * 100))}%"></div></div><b>${txt}</b></div>`;
+    const stats = [
+      bar('Damage', (st.dmg * st.pellets * st.dmgAmmo) / 100, `${Math.round(st.dmg)}${st.pellets > 1 ? '×' + st.pellets : ''}`),
+      bar('Fire rate', st.rpm / 900, `${Math.round(st.rpm)} rpm${st.mode === 'burst' ? ' (burst)' : st.mode === 'auto' ? '' : ' ' + st.mode}`),
+      bar('Range', st.range / 230, `${Math.round(st.range)} m`),
+      bar('Accuracy', 1 - st.spread / 0.09, `${(st.spread * 1000).toFixed(0)} mrad`),
+      bar('Recoil control', 1 - st.recoilV / 0.08, `${(st.recoilV * 1000).toFixed(0)}`),
+      bar('Handling', 1 - st.ads / 0.45, `${Math.round(st.ads * 1000)} ms ADS`),
+      bar('Stealth', 1 - st.noise / 100, st.suppressed ? 'suppressed' : `${Math.round(st.noise)} m heard`),
+      bar('Capacity', st.mag / 120, `${st.mag} rds`),
+    ].join('');
+    const slots = ATT_SLOTS.map(slot => {
+      if (!slotOpen(g.id, slot)) return `<div class="gs-slot off"><div class="lbl">${ATT_SLOT_NAMES[slot]}</div><div class="cost">Not available on this weapon</div></div>`;
+      const cur = g.att?.[slot];
+      const options = p.stash.map((x, i) => [x, i]).filter(([x]) => ATTACHMENTS[x.id]?.slot === slot && canAttach(g.id, x.id));
+      return `<div class="gs-slot"><div class="lbl">${ATT_SLOT_NAMES[slot]}</div>
+        ${cur ? `<div class="row">${itemHTML({ id: cur, qty: 1 })}<button class="btn tiny" data-gs="detach" data-arg="${slot}">Remove</button></div><div class="cost">${describeMods(cur)}</div>` : '<div class="cost">empty</div>'}
+        ${options.length ? options.map(([x, i]) => `<button class="btn tiny gs-fit" data-gs="fit" data-arg="${i}" title="${esc(ATTACHMENTS[x.id].name)}">Fit ${esc(ATTACHMENTS[x.id].name)}</button><div class="cost gs-mods">${describeMods(x.id)}</div>`).join('') : (cur ? '' : '<div class="cost">No compatible attachments in your stash</div>')}
+      </div>`;
+    }).join('');
+    const up = upgradeCost(g), rep = repairCost(g);
+    const costTxt = (c) => `${money(c.cash)} + ${Object.entries(c.mats).map(([m, n]) => `<span class="${have(m) >= n ? 'ok' : 'no'}">${n}x ${esc(ITEMS[m].name)}</span>`).join(', ')}`;
+    const ammoBtns = AMMO_ORDER.map(t => {
+      const item = st.ammo + AMMO_TYPES[t].suffix;
+      const n = have(item) + countItem(p.loadout.pack, item);
+      return `<button class="btn small ${st.ammoType === t ? 'primary' : ''}" data-gs="ammo" data-arg="${t}" title="${esc(ITEMS[item].name)}">${AMMO_TYPES[t].name} (${n})</button>`;
+    }).join(' ');
+    return `<div class="gs">
+      <div class="panel gs-list"><h3>Weapons</h3>${list}</div>
+      <div>
+        <div class="panel gs-main"><h3>${esc(gunName(g))} <span class="cost">${esc(st.cls)} · Tier ${st.tier}/${MAX_TIER}</span></h3>
+          <img class="gs-big" src="${gunIcon(g) ?? ''}" alt="">
+          <div class="gs-stats">${stats}</div>
+        </div>
+        <div class="panel"><h3>Attachments</h3><div class="gs-slots">${slots}</div></div>
+        <div class="panel"><h3>Bench</h3>
+          <div class="row"><div class="grow"><b>Upgrade</b> ${up ? `to tier ${TIER_NAMES[st.tier + 1]}: +5% damage, −8% recoil, −5% reload. ${costTxt(up)}` : '— max tier'}</div>${up ? '<button class="btn small" data-gs="upgrade">Upgrade</button>' : ''}</div>
+          <div class="row"><div class="grow"><b>Condition</b> ${Math.round(g.dur ?? 100)}%${(g.dur ?? 100) < 30 ? ' <span class="no">(may jam)</span>' : (g.dur ?? 100) < 50 ? ' <span class="no">(accuracy suffers)</span>' : ''} ${rep ? '· Repair: ' + costTxt(rep) : ''}</div>${rep ? '<button class="btn small" data-gs="repair">Repair</button>' : ''}</div>
+          <div class="row"><div class="grow"><b>Loaded ammo</b> <span class="cost">AP punches through shields &amp; armor plating · HP hits flesh harder</span></div>${ammoBtns}</div>
+        </div>
+      </div></div>`;
+  }
+
   tab_workbench(p) {
     const have = (id) => countItem(p.stash, id);
     const costHTML = (cost) => Object.entries(cost).map(([m, n]) => `<span class="${have(m) >= n ? 'ok' : 'no'}">${n}x ${esc(ITEMS[m].name)} (${have(m)})</span>`).join(' · ');
@@ -206,15 +286,26 @@ export class Hideout {
         <li><b>Free Kit:</b> broke? Grab a free random kit. Nothing to lose.</li>
         <li><b>Squads:</b> up to ${C.MAX_SQUAD}. Share your invite link or add friends by <b>Name#TAG</b>. Squads stay together between raids. Members ready up, then the leader deploys. If you're left behind, your slot is held for 5 minutes: hit <b>JOIN SQUAD</b> to drop in next to them. <b>Fill squad</b> matches solos together.</li>
         <li><b>The Cheap Seats:</b> walk the hub with other raiders. Use the stations (E) for your stash, trader, workbench and so on. Stand in <b>The Lift</b> to ready up or deploy. Prefer menus? Switch to <b>Menu mode</b>.</li>
+        <li><b>Gunsmith:</b> fit up to 5 attachments (muzzle, barrel, optic, magazine, grip/stock). Suppressors keep machines from hearing you. Upgrade guns to tier IV and repair worn guns, because worn guns lose accuracy and can jam (press R to clear). Choose FMJ, AP (beats shields and armor) or HP (more damage to flesh), and press <kbd>B</kbd> in a raid to switch.</li>
         <li><b>Spectate:</b> dead or extracted while squadmates are still topside? Watch them until they're out.</li>
       </ul>
-      <p><b>Controls:</b> <kbd>WASD</kbd> move · <kbd>Shift</kbd> sprint · <kbd>C</kbd> crouch · <kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> ADS · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd> weapons · <kbd>E</kbd> interact/search/revive ·
+      <p><b>Controls:</b> <kbd>WASD</kbd> move · <kbd>Shift</kbd> sprint · <kbd>C</kbd> crouch · <kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire · <kbd>RMB</kbd> ADS · <kbd>R</kbd> reload · <kbd>1</kbd>/<kbd>2</kbd> weapons · <kbd>B</kbd> ammo type · <kbd>E</kbd> interact/search/revive ·
       <kbd>Q</kbd> bandage/medkit · <kbd>Z</kbd> shield cell · <kbd>G</kbd> frag · <kbd>T</kbd> lure · <kbd>X</kbd> tourniquet (downed) · <kbd>Tab</kbd> inventory · <kbd>M</kbd> map · <kbd>F</kbd> ping · <kbd>V</kbd> swap shoulder · <kbd>Enter</kbd> chat</p></div>`;
   }
 
   // ---------------------------------------------------------------- clicks
   onClick(ev) {
     const t = ev.target;
+    const gs = t.closest('[data-gs]');
+    if (gs) {
+      const a = gs.dataset.gs, arg = gs.dataset.arg, uid = this.gsUid;
+      if (a === 'sel') { this.gsUid = arg; return this.render(); }
+      if (a === 'fit') return this.act('attach', { uid, idx: +arg });
+      if (a === 'detach') return this.act('detach', { uid, slot: arg });
+      if (a === 'upgrade') return this.act('upgrade_gun', { uid });
+      if (a === 'repair') return this.act('repair_gun', { uid });
+      if (a === 'ammo') return this.act('set_ammo', { uid, type: arg });
+    }
     const d = t.closest('[data-act],[data-buy],[data-sell],[data-craft],[data-recycle],[data-skill],[data-cclaim],[data-creroll],[data-claim],[data-rename]');
     if (d) {
       const ds = d.dataset;
@@ -241,6 +332,7 @@ export class Hideout {
         e.push({ label: 'Equip as primary', fn: () => this.act('equip', { idx, slot: 'primary' }) });
         e.push({ label: 'Equip as secondary', fn: () => this.act('equip', { idx, slot: 'secondary' }) });
         e.push({ label: `Insure (${money(it.value * 0.25)})`, fn: () => this.act('insure', { uid: s.uid }), disabled: s.uid === p.insured.uid });
+        e.push({ label: 'Open in Gunsmith', fn: () => { this.gsUid = s.uid; this.selectTab('gunsmith'); } });
       }
       if (it.type === 'shield') e.push({ label: 'Equip shield', fn: () => this.act('equip', { idx, slot: 'shield' }) });
       if (it.type === 'rig') e.push({ label: 'Equip rig', fn: () => this.act('equip', { idx, slot: 'rig' }) });
@@ -255,7 +347,10 @@ export class Hideout {
       const slot = src.slice(3);
       const s = p.loadout[slot];
       const e = [{ label: 'Unequip to stash', fn: () => this.act('unequip', { slot }) }];
-      if (ITEMS[s.id].type === 'weapon') e.push({ label: `Insure (${money(ITEMS[s.id].value * 0.25)})`, fn: () => this.act('insure', { uid: s.uid }), disabled: s.uid === p.insured.uid });
+      if (ITEMS[s.id].type === 'weapon') {
+        e.push({ label: `Insure (${money(ITEMS[s.id].value * 0.25)})`, fn: () => this.act('insure', { uid: s.uid }), disabled: s.uid === p.insured.uid });
+        e.push({ label: 'Open in Gunsmith', fn: () => { this.gsUid = s.uid; this.selectTab('gunsmith'); } });
+      }
       showMenu(ev.clientX, ev.clientY, ITEMS[s.id].name, e);
     }
   }

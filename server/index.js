@@ -135,7 +135,7 @@ const hub = new HubManager({
 Object.assign(ctx, { parties, social, hub });
 
 // ------------------------------------------------------------------ HTTP
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.mp3': 'audio/mpeg' };
 const STATIC = {
   '/vendor/three.module.js': path.join(ROOT, 'node_modules/three/build/three.module.min.js'),
 };
@@ -162,7 +162,7 @@ const server = http.createServer(async (req, res) => {
     if (err || !st.isFile()) { res.writeHead(404); return res.end('Not found'); }
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream',
-      'Cache-Control': file.includes('node_modules') ? 'public, max-age=86400' : 'no-cache',
+      'Cache-Control': file.includes('node_modules') || file.endsWith('.mp3') ? 'public, max-age=86400' : 'no-cache',
     });
     fs.createReadStream(file).pipe(res);
   });
